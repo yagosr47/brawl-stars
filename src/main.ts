@@ -32,6 +32,7 @@ import {
   REGEN_PERCENT,
   SHAKE_DECAY,
   SHOWDOWN_CRATE_COUNT,
+  TILE_SIZE,
   VIEW_HEIGHT,
   WORLD_HEIGHT,
   WORLD_WIDTH,
@@ -47,6 +48,8 @@ import { BRAWLERS, BRAWLER_ICONS, BRAWLER_IDS, BOT_NAMES } from './brawlers';
 import { GameMap, getMapCenter, getSpawns } from './map';
 import {
   applyKnockback,
+  findFreeSpot,
+  isCircleFree,
   isEntityVisible,
   moveEntity,
   projectileHitsTile,
@@ -99,6 +102,9 @@ function createEntity(
     revealTimer: 0,
     invulnTimer: 1,
     hitFlash: 0,
+    attackAnim: 0,
+    stuckTimer: 0,
+    lastPos: { x: pos.x, y: pos.y },
     alive: true,
     respawnTimer: 0,
     eliminated: false,
@@ -388,9 +394,40 @@ class Game {
       if (!e.alive || e.eliminated) continue;
       if (e.jump.active) {
         this.updateJump(e, dt);
-      } else {
-        moveEntity(e, dt, world.map);
+        e.lastPos = { x: e.pos.x, y: e.pos.y };
+        continue;
       }
+      moveEntity(e, dt, world.map);
+
+      // Anti-stuck: bots que tentam andar mas não saem do lugar são liberados.
+      const moved = dist(e.pos.x, e.pos.y, e.lastPos.x, e.lastPos.y);
+      const wantsMove = Math.hypot(e.vel.x, e.vel.y) > 30;
+      if (e.isBot && wantsMove && moved < 0.8) {
+        e.stuckTimer += dt;
+      } else {
+        e.stuckTimer = 0;
+      }
+      if (e.stuckTimer > 0.9) {
+        e.stuckTimer = 0;
+        e.aiStrafeDir = -e.aiStrafeDir;
+        e.aiState = 'ROAM';
+        e.aiTimer = 0;
+        e.wanderTarget = findFreeSpot(
+          {
+            x: e.pos.x + randRange(-TILE_SIZE * 5, TILE_SIZE * 5),
+            y: e.pos.y + randRange(-TILE_SIZE * 5, TILE_SIZE * 5),
+          },
+          e.radius,
+          world.map,
+          4,
+        );
+        // Empurrão curto para fora de quinas.
+        const a = Math.random() * Math.PI * 2;
+        e.knockback.x += Math.cos(a) * 160;
+        e.knockback.y += Math.sin(a) * 160;
+        resolveCircleTiles(e.pos, e.radius, world.map);
+      }
+      e.lastPos = { x: e.pos.x, y: e.pos.y };
     }
 
     this.updateProjectiles(dt);
@@ -408,6 +445,7 @@ class Game {
     e.revealTimer = Math.max(0, e.revealTimer - dt);
     e.invulnTimer = Math.max(0, e.invulnTimer - dt);
     e.hitFlash = Math.max(0, e.hitFlash - dt);
+    e.attackAnim = Math.max(0, e.attackAnim - dt);
     e.attackCooldown = Math.max(0, e.attackCooldown - dt);
     e.timeSinceAttack += dt;
     e.timeSinceDamage += dt;
@@ -536,7 +574,11 @@ class Game {
       const leap = e.def.super.leap;
       e.superCharge = 0;
       revealEntity(e);
+      // Efeito visual de ativação do Super
+      this.burstRing(e.pos.x, e.pos.y, '#ffe14d', 70);
+      this.addTrauma(0.3);
       if (leap) {
+        e.attackAnim = 0.18;
         const dir = { x: Math.cos(angle), y: Math.sin(angle) };
         let leapDist = leap.range;
         if (targetPos) {
@@ -545,10 +587,15 @@ class Game {
             dist(e.pos.x, e.pos.y, targetPos.x, targetPos.y),
           );
         }
+        // Busca o ponto livre mais próximo ao longo do salto (nunca dentro de bloco).
+        let to = { x: e.pos.x + dir.x * leapDist, y: e.pos.y + dir.y * leapDist };
+        if (!isCircleFree(to, e.radius, world.map)) {
+          to = findFreeSpot(to, e.radius, world.map, 3);
+        }
         e.jump = {
           active: true,
           from: { x: e.pos.x, y: e.pos.y },
-          to: { x: e.pos.x + dir.x * leapDist, y: e.pos.y + dir.y * leapDist },
+          to,
           t: 0,
           duration: leap.duration,
         };
@@ -556,6 +603,7 @@ class Game {
         this.audio.leap();
       } else {
         e.timeSinceAttack = 0;
+        e.attackAnim = 0.16;
         this.spawnAttack(e, e.def.super.attack, angle, true, targetPos);
         this.audio.shootSuper();
       }
@@ -566,6 +614,7 @@ class Game {
     e.ammo -= 1;
     e.attackCooldown = ATTACK_COOLDOWN;
     e.timeSinceAttack = 0;
+    e.attackAnim = 0.14;
     revealEntity(e);
     this.spawnAttack(e, e.def.attack, angle, false, targetPos);
     this.audio.shoot(e.def.id);
@@ -581,6 +630,24 @@ class Game {
     const world = this.world;
     if (!world) return;
     const count = def.projectileCount;
+
+    // Flash de canhão (muzzle flash)
+    const muzzleX = e.pos.x + Math.cos(angle) * (e.radius + 8);
+    const muzzleY = e.pos.y + Math.sin(angle) * (e.radius + 8);
+    for (let m = 0; m < 5; m++) {
+      const ma = angle + randRange(-0.5, 0.5);
+      world.particles.push({
+        pos: { x: muzzleX, y: muzzleY },
+        vel: { x: Math.cos(ma) * randRange(120, 300), y: Math.sin(ma) * randRange(120, 300) },
+        life: randRange(0.08, 0.18),
+        maxLife: 0.18,
+        size: randRange(3, 6),
+        color: isSuper ? '#ffffff' : def.color,
+        kind: 'FLASH',
+        gravity: 0,
+      });
+    }
+
     for (let i = 0; i < count; i++) {
       const spreadFrac = count <= 1 ? 0 : (i / (count - 1) - 0.5) * deg2rad(def.spreadDeg);
       const a = angle + spreadFrac;
@@ -704,7 +771,8 @@ class Game {
           p.hitIds.push(e.id);
           const owner = world.entities.find((o) => o.id === p.ownerId) ?? null;
           this.damageEntity(e, p.damage, owner);
-          if (p.knockback > 0) applyKnockback(e, p.dir.x, p.dir.y, p.knockback);
+          // Knockback apenas em Supers — dano comum não empurra o jogador.
+          if (p.isSuper && p.knockback > 0) applyKnockback(e, p.dir.x, p.dir.y, p.knockback);
           if (p.stun > 0) e.stunTimer = Math.max(e.stunTimer, p.stun);
           this.burst(p.pos.x, p.pos.y, p.color, 6);
           if (!p.pierce) {
@@ -745,7 +813,9 @@ class Game {
       const d = dist(p.pos.x, p.pos.y, e.pos.x, e.pos.y);
       if (d <= p.explodeRadius + e.radius) {
         this.damageEntity(e, p.damage, owner);
-        applyKnockback(e, e.pos.x - p.pos.x, e.pos.y - p.pos.y, p.knockback);
+        if (p.isSuper && p.knockback > 0) {
+          applyKnockback(e, e.pos.x - p.pos.x, e.pos.y - p.pos.y, p.knockback);
+        }
       }
     }
     for (const c of world.crates) {
@@ -796,10 +866,16 @@ class Game {
 
   private killEntity(target: Entity, attacker: Entity | null): void {
     const world = this.world;
-    if (!world) return;
+    if (!world || !target.alive || target.eliminated) return;
     target.hp = 0;
     target.alive = false;
     target.vel = { x: 0, y: 0 };
+    target.knockback = { x: 0, y: 0 };
+    target.jump = { active: false, from: { x: 0, y: 0 }, to: { x: 0, y: 0 }, t: 0, duration: 1 };
+    target.stunTimer = 0;
+    target.attackAnim = 0;
+    target.aiState = 'IDLE';
+    target.aiTimer = 0;
     this.burst(target.pos.x, target.pos.y, target.def.bodyColor, 18);
     this.burstRing(target.pos.x, target.pos.y, '#ffffff', 40);
     if (attacker && attacker.id !== target.id) attacker.stats.kills += 1;
@@ -985,15 +1061,28 @@ class Game {
       e.respawnTimer -= dt;
       if (e.respawnTimer <= 0) {
         const spawns = world.spawnPoints[e.team];
-        const sp = spawns.length > 0 ? spawns[e.id % spawns.length] : { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 };
+        const base =
+          spawns.length > 0
+            ? spawns[e.id % spawns.length]
+            : { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 };
+        // Nunca renascer dentro de blocos: garante posição livre.
+        const sp = findFreeSpot(base, e.radius, map, 5);
         e.pos.x = sp.x;
         e.pos.y = sp.y;
+        e.lastPos = { x: sp.x, y: sp.y };
+        e.vel = { x: 0, y: 0 };
+        e.knockback = { x: 0, y: 0 };
         e.hp = e.maxHp;
         e.ammo = MAX_AMMO;
         e.alive = true;
-        e.invulnTimer = 1.2;
+        e.stuckTimer = 0;
+        e.stunTimer = 0;
+        e.aiState = 'IDLE';
+        e.aiTimer = 0;
+        e.invulnTimer = 1.5;
         e.superCharge = Math.min(1, e.superCharge + 0.25);
         this.burst(e.pos.x, e.pos.y, e.def.accentColor, 12);
+        this.burstRing(e.pos.x, e.pos.y, e.def.accentColor, 46);
       }
     }
   }
@@ -1194,6 +1283,17 @@ class Game {
   private burstRing(x: number, y: number, color: string, radius: number): void {
     const world = this.world;
     if (!world) return;
+    // Flash central branco
+    world.particles.push({
+      pos: { x, y },
+      vel: { x: 0, y: 0 },
+      life: 0.22,
+      maxLife: 0.22,
+      size: Math.max(22, radius * 0.5),
+      color: '#fff7d6',
+      kind: 'FLASH',
+      gravity: 0,
+    });
     world.particles.push({
       pos: { x, y },
       vel: { x: 0, y: 0 },
@@ -1204,17 +1304,17 @@ class Game {
       kind: 'RING',
       gravity: 0,
     });
-    for (let i = 0; i < 10; i++) {
-      const a = (i / 10) * Math.PI * 2;
+    for (let i = 0; i < 12; i++) {
+      const a = (i / 12) * Math.PI * 2;
       world.particles.push({
-        pos: { x: x + Math.cos(a) * radius * 0.35, y: y + Math.sin(a) * radius * 0.35 },
-        vel: { x: Math.cos(a) * radius * 1.6, y: Math.sin(a) * radius * 1.6 },
-        life: 0.38,
-        maxLife: 0.38,
-        size: 5,
-        color,
-        kind: 'SMOKE',
-        gravity: -30,
+        pos: { x: x + Math.cos(a) * radius * 0.3, y: y + Math.sin(a) * radius * 0.3 },
+        vel: { x: Math.cos(a) * radius * 1.7, y: Math.sin(a) * radius * 1.7 },
+        life: randRange(0.3, 0.45),
+        maxLife: 0.45,
+        size: randRange(3.5, 6),
+        color: i % 2 === 0 ? color : '#ffd27f',
+        kind: i % 3 === 0 ? 'SMOKE' : 'SPARK',
+        gravity: i % 3 === 0 ? -30 : 120,
       });
     }
   }

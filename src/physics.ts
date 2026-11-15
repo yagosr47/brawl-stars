@@ -1,221 +1,139 @@
-import type { Vector2, Tile } from './types.js';
-import { TILE_SIZE, PHYSICS, clamp } from './constants.js';
-import { isSolid, getTile, getTileAt, tileRect } from './map.js';
+/* ============================================================
+   ARENA BRAWLER — Física: Círculo×AABB com deslizamento,
+   linha de visão, arbustos, knockback e visibilidade.
+   ============================================================ */
 
-export function resolveCircleVsTiles(
-  pos: Vector2,
-  radius: number,
-  vel: Vector2,
-  tiles: Tile[][],
-  tileSize: number,
-): { pos: Vector2; vel: Vector2; collided: boolean } {
-  const nextX = pos.x + vel.x;
-  const nextY = pos.y + vel.y;
-  let outX = nextX;
-  let outY = nextY;
-  let outVX = vel.x;
-  let outVY = vel.y;
+import type { Entity, GameMode, TileMapView, Vec2, World } from './types';
+import {
+  BUSH_DETECT_RADIUS,
+  BUSH_REVEAL_TIME,
+  KNOCKBACK_DECAY,
+  clamp,
+  dist,
+  normalize,
+} from './constants';
+
+/**
+ * Resolve colisão Círculo vs. AABB (tile) empurrando o círculo
+ * apenas ao longo da normal — o que gera deslizamento suave em
+ * paredes e quinas (sem travar).
+ */
+export function resolveCircleTiles(pos: Vec2, radius: number, map: TileMapView): boolean {
+  const ts = map.tileSize;
   let collided = false;
+  const minTX = Math.floor((pos.x - radius) / ts);
+  const maxTX = Math.floor((pos.x + radius) / ts);
+  const minTY = Math.floor((pos.y - radius) / ts);
+  const maxTY = Math.floor((pos.y + radius) / ts);
 
-  const rx = resolveAxisX(pos, outX, outY, radius, vel.x, tiles, tileSize);
-  outX = rx.x;
-  collided = collided || rx.collided;
-  if (rx.collided) outVX = 0;
+  for (let ty = minTY; ty <= maxTY; ty++) {
+    for (let tx = minTX; tx <= maxTX; tx++) {
+      if (!map.isSolidAt(tx * ts + ts * 0.5, ty * ts + ts * 0.5)) continue;
+      const left = tx * ts;
+      const top = ty * ts;
+      const right = left + ts;
+      const bottom = top + ts;
 
-  const ry = resolveAxisY({ x: outX, y: pos.y }, outX, outY, radius, vel.y, tiles, tileSize);
-  outY = ry.y;
-  collided = collided || ry.collided;
-  if (ry.collided) outVY = 0;
+      const cx = clamp(pos.x, left, right);
+      const cy = clamp(pos.y, top, bottom);
+      const dx = pos.x - cx;
+      const dy = pos.y - cy;
+      const d2 = dx * dx + dy * dy;
 
-  outX = clamp(outX, radius, TILE_SIZE * tiles[0].length - radius);
-  outY = clamp(outY, radius, TILE_SIZE * tiles.length - radius);
-
-  return { pos: { x: outX, y: outY }, vel: { x: outVX, y: outVY }, collided };
-}
-
-function resolveAxisX(
-  pos: Vector2,
-  nextX: number,
-  nextY: number,
-  radius: number,
-  moveX: number,
-  tiles: Tile[][],
-  tileSize: number,
-): { x: number; collided: boolean } {
-  let cx = nextX;
-  let cy = nextY;
-  let collided = false;
-
-  const tilesToCheck = getTilesAround(cx, cy, radius, tiles, tileSize);
-  for (const tile of tilesToCheck) {
-    if (!isSolid(tile)) continue;
-    const r = tileRect(tile, tileSize);
-    const closestX = clamp(cx, r.x, r.x + r.w);
-    const closestY = clamp(cy, r.y, r.y + r.h);
-    const dx = cx - closestX;
-    const dy = cy - closestY;
-    const distSq = dx * dx + dy * dy;
-
-    if (distSq < radius * radius && distSq > 0) {
-      const dist = Math.sqrt(distSq);
-      const overlap = radius - dist;
-      const nx = dx / dist;
-      cx += nx * overlap;
+      if (d2 >= radius * radius) continue;
       collided = true;
+
+      if (d2 > 1e-8) {
+        const d = Math.sqrt(d2);
+        const push = radius - d + 0.05;
+        pos.x += (dx / d) * push;
+        pos.y += (dy / d) * push;
+      } else {
+        // Centro dentro do tile: sai pelo eixo de menor penetração.
+        const pushLeft = pos.x - left + radius;
+        const pushRight = right - pos.x + radius;
+        const pushTop = pos.y - top + radius;
+        const pushBottom = bottom - pos.y + radius;
+        const minPush = Math.min(pushLeft, pushRight, pushTop, pushBottom);
+        if (minPush === pushLeft) pos.x = left - radius - 0.05;
+        else if (minPush === pushRight) pos.x = right + radius + 0.05;
+        else if (minPush === pushTop) pos.y = top - radius - 0.05;
+        else pos.y = bottom + radius + 0.05;
+      }
     }
   }
-
-  return { x: cx, collided };
+  return collided;
 }
 
-function resolveAxisY(
-  pos: Vector2,
-  nextX: number,
-  nextY: number,
-  radius: number,
-  moveY: number,
-  tiles: Tile[][],
-  tileSize: number,
-): { y: number; collided: boolean } {
-  let cx = nextX;
-  let cy = nextY;
-  let collided = false;
-
-  const tilesToCheck = getTilesAround(cx, cy, radius, tiles, tileSize);
-  for (const tile of tilesToCheck) {
-    if (!isSolid(tile)) continue;
-    const r = tileRect(tile, tileSize);
-    const closestX = clamp(cx, r.x, r.x + r.w);
-    const closestY = clamp(cy, r.y, r.y + r.h);
-    const dx = cx - closestX;
-    const dy = cy - closestY;
-    const distSq = dx * dx + dy * dy;
-
-    if (distSq < radius * radius && distSq > 0) {
-      const dist = Math.sqrt(distSq);
-      const overlap = radius - dist;
-      const ny = dy / dist;
-      cy += ny * overlap;
-      collided = true;
-    }
-  }
-
-  return { y: cy, collided };
+/** Move a entidade pela velocidade + knockback e resolve colisões. */
+export function moveEntity(e: Entity, dt: number, map: TileMapView): void {
+  e.pos.x += (e.vel.x + e.knockback.x) * dt;
+  e.pos.y += (e.vel.y + e.knockback.y) * dt;
+  resolveCircleTiles(e.pos, e.radius, map);
+  e.pos.x = clamp(e.pos.x, e.radius, map.width * map.tileSize - e.radius);
+  e.pos.y = clamp(e.pos.y, e.radius, map.height * map.tileSize - e.radius);
+  const decay = Math.exp(-KNOCKBACK_DECAY * dt);
+  e.knockback.x *= decay;
+  e.knockback.y *= decay;
+  if (Math.abs(e.knockback.x) < 2) e.knockback.x = 0;
+  if (Math.abs(e.knockback.y) < 2) e.knockback.y = 0;
 }
 
-export function getTilesAround(
-  x: number,
-  y: number,
-  radius: number,
-  tiles: Tile[][],
-  tileSize: number,
-): Tile[] {
-  const found: Tile[] = [];
-  const minTx = Math.floor((x - radius) / tileSize) - 1;
-  const maxTx = Math.floor((x + radius) / tileSize) + 1;
-  const minTy = Math.floor((y - radius) / tileSize) - 1;
-  const maxTy = Math.floor((y + radius) / tileSize) + 1;
-  for (let ty = minTy; ty <= maxTy; ty++) {
-    for (let tx = minTx; tx <= maxTx; tx++) {
-      const t = getTile(tiles, tx, ty);
-      if (t) found.push(t);
-    }
-  }
-  return found;
+/** Aplica um impulso de knockback acumulativo. */
+export function applyKnockback(e: Entity, dirX: number, dirY: number, force: number): void {
+  const n = normalize(dirX, dirY);
+  e.knockback.x += n.x * force;
+  e.knockback.y += n.y * force;
 }
 
-export function hasLineOfSight(
-  p1: Vector2,
-  p2: Vector2,
-  tiles: Tile[][],
-  tileSize: number,
-): boolean {
-  const dx = p2.x - p1.x;
-  const dy = p2.y - p1.y;
-  const dist = Math.hypot(dx, dy);
-  if (dist === 0) return true;
-  const steps = Math.ceil(dist / 4);
-  const nx = dx / dist;
-  const ny = dy / dist;
-  for (let i = 1; i <= steps; i++) {
-    const tx = p1.x + nx * i * 4;
-    const ty = p1.y + ny * i * 4;
-    const tile = getTileAt(tiles, tx, ty, tileSize);
-    if (tile && isSolid(tile)) return false;
+/** Linha de visão: paredes bloqueiam; água e arbustos não. */
+export function lineOfSight(map: TileMapView, x0: number, y0: number, x1: number, y1: number): boolean {
+  const dx = x1 - x0;
+  const dy = y1 - y0;
+  const length = Math.hypot(dx, dy);
+  const steps = Math.max(1, Math.ceil(length / (map.tileSize * 0.35)));
+  for (let i = 1; i < steps; i++) {
+    const t = i / steps;
+    if (map.isProjectileBlockingAt(x0 + dx * t, y0 + dy * t)) return false;
   }
   return true;
 }
 
-export function tileBushProximity(
-  tiles: Tile[][],
-  pos: Vector2,
-  tileSize: number,
-): boolean {
-  const tx = Math.floor(pos.x / tileSize);
-  const ty = Math.floor(pos.y / tileSize);
-  for (let y = ty - 1; y <= ty + 1; y++) {
-    for (let x = tx - 1; x <= tx + 1; x++) {
-      const t = getTile(tiles, x, y);
-      if (t && t.type === 'BUSH') return true;
-    }
+/** Dois jogadores são inimigos? */
+export function isEnemy(a: Entity, b: Entity, mode: GameMode): boolean {
+  if (a.id === b.id) return false;
+  if (mode === 'SHOWDOWN') return true;
+  return a.team !== b.team;
+}
+
+/**
+ * Regras de stealth dos arbustos:
+ * - Aliados sempre se veem.
+ * - Inimigo em arbusto é invisível, exceto:
+ *   (a) a menos de 2.5 tiles, (b) revelado por ataque/dano (1.2s),
+ *   (c) sem arbusto — vale a linha de visão normal.
+ */
+export function isEntityVisible(target: Entity, viewer: Entity, world: World): boolean {
+  if (target.id === viewer.id) return true;
+  if (!target.alive || target.eliminated) return false;
+  if (!isEnemy(target, viewer, world.mode)) return true;
+
+  const inBush = world.map.isBushAt(target.pos.x, target.pos.y);
+  if (!inBush) {
+    return lineOfSight(world.map, viewer.pos.x, viewer.pos.y, target.pos.x, target.pos.y);
   }
-  return false;
-}
-
-export function getTilesInRadius(
-  tiles: Tile[][],
-  center: Vector2,
-  radius: number,
-  tileSize: number,
-): Tile[] {
-  const found: Tile[] = [];
-  const minTx = Math.floor((center.x - radius) / tileSize) - 1;
-  const maxTx = Math.floor((center.x + radius) / tileSize) + 1;
-  const minTy = Math.floor((center.y - radius) / tileSize) - 1;
-  const maxTy = Math.floor((center.y + radius) / tileSize) + 1;
-  for (let ty = minTy; ty <= maxTy; ty++) {
-    for (let tx = minTx; tx <= maxTx; tx++) {
-      const t = getTile(tiles, tx, ty);
-      if (t) found.push(t);
-    }
+  if (target.revealTimer > 0) {
+    return lineOfSight(world.map, viewer.pos.x, viewer.pos.y, target.pos.x, target.pos.y);
   }
-  return found;
+  return dist(viewer.pos.x, viewer.pos.y, target.pos.x, target.pos.y) < BUSH_DETECT_RADIUS;
 }
 
-export function applyKnockback(
-  b: { pos: Vector2; knockbackVel: Vector2; knockbackTime: number },
-  direction: Vector2,
-  strength: number,
-  duration: number,
-): void {
-  b.knockbackVel = { x: direction.x * strength, y: direction.y * strength };
-  b.knockbackTime = duration;
+/** Revela o brawler ao atacar ou ao sofrer dano. */
+export function revealEntity(e: Entity): void {
+  e.revealTimer = Math.max(e.revealTimer, BUSH_REVEAL_TIME);
 }
 
-export function updateKnockback(b: { knockbackVel: Vector2; knockbackTime: number }, dt: number): void {
-  if (b.knockbackTime > 0) {
-    b.knockbackTime = Math.max(0, b.knockbackTime - dt);
-    b.knockbackVel.x *= PHYSICS.KNOCKBACK_FRICTION;
-    b.knockbackVel.y *= PHYSICS.KNOCKBACK_FRICTION;
-    if (Math.abs(b.knockbackVel.x) < 1 && Math.abs(b.knockbackVel.y) < 1) {
-      b.knockbackVel = { x: 0, y: 0 };
-      b.knockbackTime = 0;
-    }
-  }
-}
-
-export function distance(a: Vector2, b: Vector2): number {
-  return Math.hypot(a.x - b.x, a.y - b.y);
-}
-
-export function distanceSq(a: Vector2, b: Vector2): number {
-  const dx = a.x - b.x;
-  const dy = a.y - b.y;
-  return dx * dx + dy * dy;
-}
-
-export function normalize(v: Vector2): Vector2 {
-  const len = Math.hypot(v.x, v.y);
-  if (len === 0) return { x: 0, y: 0 };
-  return { x: v.x / len, y: v.y / len };
+/** Projétil colide com tile sólido para projéteis? */
+export function projectileHitsTile(map: TileMapView, x: number, y: number): boolean {
+  return map.isProjectileBlockingAt(x, y);
 }

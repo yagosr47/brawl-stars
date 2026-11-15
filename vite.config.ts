@@ -1,19 +1,23 @@
 import { defineConfig } from 'vite';
 
 export default defineConfig({
-  root: '.',
-  publicDir: 'public',
+  base: './',
   build: {
+    target: 'es2020',
     outDir: 'dist',
-    sourcemap: true,
-    minify: 'esbuild',
-    rollupOptions: {
-      input: 'index.html',
-    },
+    assetsInlineLimit: 16384,
+    chunkSizeWarningLimit: 1024,
   },
   server: {
-    port: 5173,
-    open: true,
     host: true,
+    port: 5173,
+    strictPort: true,
+    allowedHosts: true,
+  },
+  preview: {
+    host: true,
+    port: 4173,
+    strictPort: true,
+    allowedHosts: true,
   },
 });

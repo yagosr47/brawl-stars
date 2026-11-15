@@ -1,173 +1,248 @@
+/* ============================================================
+   ARENA BRAWLER — Tipagem estrita do jogo
+   ============================================================ */
+
+/** Vetor 2D genérico. */
+export interface Vec2 {
+  x: number;
+  y: number;
+}
+
+/** Tipo de ataque de um brawler. */
 export type AttackType = 'LINEAR' | 'CONE' | 'LOBBED';
-export type TileType = 'FLOOR' | 'WALL_INDESTRUCTIBLE' | 'WALL_DESTRUCTIBLE' | 'WATER' | 'BUSH';
-export type AIState = 'IDLE' | 'PATROL' | 'CHASE' | 'ATTACK' | 'DODGE' | 'RETREAT' | 'SUPER' | 'RETREAT_HEAL';
-export type GameScreen = 'MENU' | 'MODE_SELECT' | 'BRAWLER_SELECT' | 'PLAYING' | 'GAME_OVER';
+
+/** Tipos de terreno do mapa. */
+export type TileType = 'FLOOR' | 'WALL' | 'BREAKABLE' | 'WATER' | 'BUSH';
+
+/** Estados da máquina de estados finitos (FSM) da IA. */
+export type AIState = 'IDLE' | 'ROAM' | 'COLLECT' | 'CHASE' | 'ATTACK' | 'RETREAT';
+
+/** Modos de jogo. */
 export type GameMode = 'GEM_GRAB' | 'SHOWDOWN';
-export type BrawlerId = 'SHELLY' | 'COLT' | 'BARLEY' | 'ELPRIMO';
-export type Team = 'BLUE' | 'RED';
 
-export interface Vector2 {
-  x: number;
-  y: number;
-}
+/** Telas do jogo. */
+export type GameScreen = 'MENU' | 'MODE_SELECT' | 'BRAWLER_SELECT' | 'PLAYING' | 'GAME_OVER';
 
-export interface Rect {
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-}
+/** Times. Em Showdown todos são NEUTRAL (todos contra todos). */
+export type Team = 'BLUE' | 'RED' | 'NEUTRAL';
 
-export interface BrawlerStats {
-  maxHealth: number;
-  moveSpeed: number;
-  attackRange: number;
-  attackDamage: number;
-  attackCooldown: number;
-  projectileSpeed: number;
-  projectileLifetime: number;
+/** Definição completa de um ataque normal ou Super. */
+export interface AttackDef {
+  type: AttackType;
+  damage: number;
+  projectileCount: number;
+  spreadDeg: number;
+  speed: number;
+  range: number;
+  radius: number;
   reloadTime: number;
-  superChargeTime: number;
-  superDamage: number;
-  radius: number;
-}
-
-export interface BrawlerDefinition {
-  id: BrawlerId;
-  name: string;
-  archetype: 'FIGHTER' | 'SHARPSHOOTER' | 'THROWER' | 'TANK';
-  attackType: AttackType;
-  stats: BrawlerStats;
   color: string;
-  superType: 'WALL_BREAK' | 'PIERCE_BURST' | 'MULTI_EXPLOSIVE' | 'JUMP';
-  description: string;
+  knockback: number;
+  pierce: boolean;
+  explodeRadius: number;
+  flightTime: number;
+  arcHeight: number;
+  stun: number;
+  destroyWalls: boolean;
 }
 
-export interface Brawler extends BrawlerDefinition {
-  team: Team;
-  pos: Vector2;
-  vel: Vector2;
-  health: number;
-  maxHealth: number;
-  ammo: number;
-  maxAmmo: number;
-  lastShotTime: number;
-  superCharge: number;
-  maxSuperCharge: number;
-  isSuperActive: boolean;
-  superActiveTime: number;
-  knockbackVel: Vector2;
-  knockbackTime: number;
-  stunTime: number;
-  revealTime: number;
-  inBush: boolean;
-  lastDamageTime: number;
-  regenTimer: number;
-  powerCubes: number;
+/** Especificação de Super de salto (tanque). */
+export interface LeapSpec {
+  range: number;
+  duration: number;
+  landRadius: number;
+  landDamage: number;
+  landStun: number;
+  invulnerable: boolean;
+}
+
+/** Definição de Super: ataque associado e/ou salto. */
+export interface SuperDef {
+  attack: AttackDef;
+  leap: LeapSpec | null;
+}
+
+/** Definição estática de um Brawler. */
+export interface BrawlerDef {
+  id: string;
+  name: string;
+  role: string;
+  blurb: string;
+  maxHp: number;
+  speed: number;
   radius: number;
-  facing: Vector2;
-  targetPos: Vector2;
+  bodyColor: string;
+  darkColor: string;
+  accentColor: string;
+  attack: AttackDef;
+  super: SuperDef;
+  superDamageNeeded: number;
+}
+
+/** Estado do salto do Super do tanque. */
+export interface JumpState {
+  active: boolean;
+  from: Vec2;
+  to: Vec2;
+  t: number;
+  duration: number;
+}
+
+/** Estatísticas por partida. */
+export interface EntityStats {
+  kills: number;
+  damageDealt: number;
+  gemsCollected: number;
+}
+
+/** Entidade jogável (humano ou bot). */
+export interface Entity {
+  id: number;
+  def: BrawlerDef;
+  name: string;
+  team: Team;
+  isBot: boolean;
+  pos: Vec2;
+  vel: Vec2;
+  facing: number;
+  radius: number;
+  hp: number;
+  maxHp: number;
+  speed: number;
+  ammo: number;
+  attackCooldown: number;
+  timeSinceAttack: number;
+  timeSinceDamage: number;
+  regenTick: number;
+  superCharge: number;
+  gems: number;
+  powerCubes: number;
+  stunTimer: number;
+  revealTimer: number;
+  invulnTimer: number;
+  hitFlash: number;
+  alive: boolean;
+  respawnTimer: number;
+  eliminated: boolean;
+  knockback: Vec2;
+  jump: JumpState;
   aiState: AIState;
   aiTimer: number;
-  isBot: boolean;
+  aiTargetId: number;
+  aiStrafeDir: number;
+  wanderTarget: Vec2;
+  stats: EntityStats;
 }
 
+/** Projétil em voo (linear, em cone ou parabólico). */
 export interface Projectile {
   id: number;
-  pos: Vector2;
-  vel: Vector2;
-  damage: number;
   ownerId: number;
   ownerTeam: Team;
-  lifetime: number;
-  maxLifetime: number;
+  kind: AttackType;
+  pos: Vec2;
+  vel: Vec2;
+  dir: Vec2;
+  start: Vec2;
+  target: Vec2;
   radius: number;
-  type: AttackType;
+  damage: number;
   speed: number;
-  pierce: number;
-  explosive: boolean;
+  traveled: number;
+  maxRange: number;
+  life: number;
+  isSuper: boolean;
+  color: string;
+  pierce: boolean;
+  hitIds: number[];
+  knockback: number;
   explodeRadius: number;
-  lobbed: boolean;
+  flightTime: number;
+  flightT: number;
   arcHeight: number;
-  bounced: number;
-  markForRemoval: boolean;
+  stun: number;
+  destroyWalls: boolean;
+  dead: boolean;
 }
 
-export interface Gem {
-  pos: Vector2;
-  value: number;
-  collected: boolean;
+/** Item coletável (gema ou cubo de poder). */
+export interface Pickup {
+  id: number;
+  kind: 'GEM' | 'POWER_CUBE';
+  pos: Vec2;
+  vel: Vec2;
+  radius: number;
+  life: number;
+  bob: number;
 }
 
-export interface PowerCube {
-  pos: Vector2;
-  collected: boolean;
+/** Caixa destrutível do Showdown. */
+export interface Crate {
+  id: number;
+  pos: Vec2;
+  hp: number;
+  maxHp: number;
+  radius: number;
+  hitFlash: number;
 }
 
+/** Partícula de efeito visual. */
 export interface Particle {
-  pos: Vector2;
-  vel: Vector2;
+  pos: Vec2;
+  vel: Vec2;
   life: number;
   maxLife: number;
+  size: number;
   color: string;
+  kind: 'CIRCLE' | 'SPARK' | 'SMOKE' | 'RING';
+  gravity: number;
+}
+
+/** Número de dano flutuante. */
+export interface Floater {
+  pos: Vec2;
+  text: string;
+  color: string;
+  life: number;
+  maxLife: number;
+  vy: number;
   size: number;
 }
 
-export interface DamageNumber {
-  pos: Vector2;
-  text: string;
-  life: number;
-  maxLife: number;
-  color: string;
-  vel: Vector2;
+/** Visão somente-leitura do mapa usada por física/IA/renderer. */
+export interface TileMapView {
+  readonly width: number;
+  readonly height: number;
+  readonly tileSize: number;
+  getTile(tx: number, ty: number): TileType;
+  isSolidAt(px: number, py: number): boolean;
+  isProjectileBlockingAt(px: number, py: number): boolean;
+  isBushAt(px: number, py: number): boolean;
+  isWaterAt(px: number, py: number): boolean;
 }
 
-export interface Tile {
-  type: TileType;
-  x: number;
-  y: number;
-  hp: number;
-  maxHp: number;
-}
-
-export interface GameState {
-  screen: GameScreen;
-  mode: GameMode | null;
-  playerTeam: Team;
-  playerBrawler: BrawlerId | null;
-  brawlers: Brawler[];
-  projectiles: Projectile[];
-  gems: Gem[];
-  powerCubes: PowerCube[];
-  particles: Particle[];
-  damageNumbers: DamageNumber[];
-  tiles: Tile[][];
-  mapWidth: number;
-  mapHeight: number;
-  tileSize: number;
-  camera: Vector2;
-  shakeTrauma: number;
+/** Estado completo do mundo da partida. */
+export interface World {
+  map: TileMapView;
+  mode: GameMode;
   time: number;
-  gemSpawnTimer: number;
-  toxicCloudRadius: number;
-  winner: Team | null;
-  gemsHeld: { BLUE: number; RED: number };
-  gemCountdown: number;
-  showCountdown: boolean;
-}
-
-export interface InputState {
-  move: Vector2;
-  aim: Vector2;
-  shoot: boolean;
-  shootJustPressed: boolean;
-  super: boolean;
-  superJustPressed: boolean;
-  fullscreen: boolean;
-  fullscreenJustPressed: boolean;
-}
-
-export interface SoundEffect {
-  type: 'SHOT' | 'IMPACT' | 'WALL_BREAK' | 'GEM_PICKUP' | 'COUNTDOWN' | 'VICTORY' | 'DEFEAT' | 'SUPER';
-  volume: number;
+  entities: Entity[];
+  projectiles: Projectile[];
+  pickups: Pickup[];
+  crates: Crate[];
+  particles: Particle[];
+  floaters: Floater[];
+  spawnPoints: Record<Team, Vec2[]>;
+  gemTimer: number;
+  countdown: number;
+  countdownActive: boolean;
+  countdownTeam: Team;
+  poisonRadius: number;
+  poisonTimer: number;
+  poisonLevel: number;
+  nextId: number;
+  gameOver: boolean;
+  winner: string;
+  result: 'VICTORY' | 'DEFEAT';
+  playerPlacement: number;
 }

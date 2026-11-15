@@ -1,139 +1,230 @@
-import type { BrawlerDefinition, BrawlerStats, BrawlerId, Team, Brawler } from './types.js';
+/* ============================================================
+   ARENA BRAWLER — Definição dos 4 Brawlers
+   ============================================================ */
 
-const SHELLY_STATS: BrawlerStats = {
-  maxHealth: 4200,
-  moveSpeed: 360,
-  attackRange: 7.5 * 40,
-  attackDamage: 900,
-  attackCooldown: 1.1,
-  projectileSpeed: 900,
-  projectileLifetime: 0.85,
-  reloadTime: 1.5,
-  superChargeTime: 5.5,
-  superDamage: 1200,
-  radius: 22,
-};
+import type { BrawlerDef } from './types';
 
-const COLT_STATS: BrawlerStats = {
-  maxHealth: 3000,
-  moveSpeed: 390,
-  attackRange: 11.5 * 40,
-  attackDamage: 1100,
-  attackCooldown: 0.75,
-  projectileSpeed: 1350,
-  projectileLifetime: 1.0,
-  reloadTime: 1.1,
-  superChargeTime: 6.0,
-  superDamage: 700,
-  radius: 18,
-};
+const mkAttack = (
+  type: BrawlerDef['attack']['type'],
+  damage: number,
+  projectileCount: number,
+  spreadDeg: number,
+  speed: number,
+  range: number,
+  radius: number,
+  reloadTime: number,
+  color: string,
+  knockback: number,
+  pierce: boolean,
+  explodeRadius: number,
+  flightTime: number,
+  arcHeight: number,
+  stun: number,
+  destroyWalls: boolean,
+): BrawlerDef['attack'] => ({
+  type,
+  damage,
+  projectileCount,
+  spreadDeg,
+  speed,
+  range,
+  radius,
+  reloadTime,
+  color,
+  knockback,
+  pierce,
+  explodeRadius,
+  flightTime,
+  arcHeight,
+  stun,
+  destroyWalls,
+});
 
-const BARLEY_STATS: BrawlerStats = {
-  maxHealth: 3400,
-  moveSpeed: 340,
-  attackRange: 9.5 * 40,
-  attackDamage: 1050,
-  attackCooldown: 1.4,
-  projectileSpeed: 520,
-  projectileLifetime: 2.6,
-  reloadTime: 1.6,
-  superChargeTime: 6.5,
-  superDamage: 850,
-  radius: 20,
-};
-
-const ELPRIMO_STATS: BrawlerStats = {
-  maxHealth: 5600,
-  moveSpeed: 410,
-  attackRange: 2.6 * 40,
-  attackDamage: 1800,
-  attackCooldown: 0.9,
-  projectileSpeed: 0,
-  projectileLifetime: 0,
-  reloadTime: 1.2,
-  superChargeTime: 6.0,
-  superDamage: 1600,
-  radius: 26,
-};
-
-export const BRAWLERS: Record<BrawlerId, BrawlerDefinition> = {
-  SHELLY: {
-    id: 'SHELLY',
-    name: 'Shelly',
-    archetype: 'FIGHTER',
-    attackType: 'CONE',
-    stats: SHELLY_STATS,
-    color: '#fb7185',
-    superType: 'WALL_BREAK',
-    description: 'Escopeta de 5 projéteis em cone. O Super destrói paredes e aplica empurrão.',
+/**
+ * 1) SCARLET — Lutador/Escopeta (Shelly-like)
+ *    Disparo em cone de 5 projéteis; mais dano de perto.
+ *    Super: explosão em cone que destrói paredes e aplica knockback.
+ */
+const scarlet: BrawlerDef = {
+  id: 'scarlet',
+  name: 'Scarlet',
+  role: 'Lutador',
+  blurb: 'Escopeta em cone com 5 projéteis. Super destrói paredes e empurra inimigos!',
+  maxHp: 5200,
+  speed: 212,
+  radius: 15,
+  bodyColor: '#e8485c',
+  darkColor: '#8c2036',
+  accentColor: '#ffd23f',
+  attack: mkAttack('CONE', 380, 5, 26, 520, 250, 7, 1.5, '#ffd23f', 60, false, 0, 0, 0, 0, false),
+  super: {
+    attack: mkAttack(
+      'CONE',
+      460,
+      9,
+      36,
+      620,
+      310,
+      9,
+      0,
+      '#ff9f1c',
+      430,
+      false,
+      0,
+      0,
+      0,
+      0,
+      true,
+    ),
+    leap: null,
   },
-  COLT: {
-    id: 'COLT',
-    name: 'Colt',
-    archetype: 'SHARPSHOOTER',
-    attackType: 'LINEAR',
-    stats: COLT_STATS,
-    color: '#3b82f6',
-    superType: 'PIERCE_BURST',
-    description: 'Projétil único de alta velocidade. O Super dispara rajada perfurante.',
-  },
-  BARLEY: {
-    id: 'BARLEY',
-    name: 'Barley',
-    archetype: 'THROWER',
-    attackType: 'LOBBED',
-    stats: BARLEY_STATS,
-    color: '#a3e635',
-    superType: 'MULTI_EXPLOSIVE',
-    description: 'Projétil parabólico que ignora paredes e explode em área.',
-  },
-  ELPRIMO: {
-    id: 'ELPRIMO',
-    name: 'El Primo',
-    archetype: 'TANK',
-    attackType: 'CONE',
-    stats: ELPRIMO_STATS,
-    color: '#f59e0b',
-    superType: 'JUMP',
-    description: 'Tanque com ataque corpo-a-corpo. O Super salta até o alvo causando dano e atordoamento.',
-  },
+  superDamageNeeded: 1500,
 };
 
-export function makeBrawler(id: BrawlerId, team: Team, pos: { x: number; y: number }, isBot: boolean = false): Brawler {
-  const def = BRAWLERS[id];
-  const stats = def.stats;
-  const now = performance.now();
-  return {
-    ...def,
-    team,
-    pos: { x: pos.x, y: pos.y },
-    vel: { x: 0, y: 0 },
-    health: stats.maxHealth,
-    maxHealth: stats.maxHealth,
-    ammo: 3,
-    maxAmmo: 3,
-    lastShotTime: now - stats.reloadTime,
-    superCharge: 0,
-    maxSuperCharge: 100,
-    isSuperActive: false,
-    superActiveTime: 0,
-    knockbackVel: { x: 0, y: 0 },
-    knockbackTime: 0,
-    stunTime: 0,
-    revealTime: 0,
-    inBush: false,
-    lastDamageTime: now,
-    regenTimer: 0,
-    powerCubes: 0,
-    radius: stats.radius,
-    facing: { x: 1, y: 0 },
-    targetPos: { x: pos.x, y: pos.y },
-    aiState: 'IDLE',
-    aiTimer: 0,
-    isBot,
-  };
-}
+/**
+ * 2) HAWK — Atirador/Sniper (Colt/Piper-like)
+ *    Projétil único rápido e de longo alcance.
+ *    Super: rajada perfurante de longa distância.
+ */
+const hawk: BrawlerDef = {
+  id: 'hawk',
+  name: 'Hawk',
+  role: 'Atirador',
+  blurb: 'Tiro único veloz e preciso de longuíssimo alcance. Super perfura tudo!',
+  maxHp: 3200,
+  speed: 226,
+  radius: 14,
+  bodyColor: '#39c1ff',
+  darkColor: '#155e8c',
+  accentColor: '#7df9ff',
+  attack: mkAttack('LINEAR', 720, 1, 0, 900, 430, 6, 1.7, '#7df9ff', 40, false, 0, 0, 0, 0, false),
+  super: {
+    attack: mkAttack(
+      'LINEAR',
+      430,
+      6,
+      7,
+      1050,
+      560,
+      7,
+      0,
+      '#00e5ff',
+      60,
+      true,
+      0,
+      0,
+      0,
+      0,
+      false,
+    ),
+    leap: null,
+  },
+  superDamageNeeded: 1600,
+};
 
-export function brawlerColor(b: Brawler): string {
-  return b.color;
-}
+/**
+ * 3) FUSE — Lançador/Thrower (Barley/Dynamike-like)
+ *    Projétil parabólico que ignora paredes e explode em área.
+ *    Super: múltiplos explosivos em grande raio.
+ */
+const fuse: BrawlerDef = {
+  id: 'fuse',
+  name: 'Fuse',
+  role: 'Lançador',
+  blurb: 'Joga explosivos por cima das paredes! Super chove bombas em grande área.',
+  maxHp: 3600,
+  speed: 216,
+  radius: 14,
+  bodyColor: '#b44dff',
+  darkColor: '#5c1f8c',
+  accentColor: '#ffb347',
+  attack: mkAttack('LOBBED', 620, 1, 0, 0, 320, 8, 1.9, '#ffb347', 80, false, 62, 0.85, 90, 0, false),
+  super: {
+    attack: mkAttack(
+      'LOBBED',
+      720,
+      4,
+      26,
+      0,
+      350,
+      8,
+      0,
+      '#ff8c42',
+      110,
+      false,
+      100,
+      1.05,
+      120,
+      0,
+      true,
+    ),
+    leap: null,
+  },
+  superDamageNeeded: 1500,
+};
+
+/**
+ * 4) BRUTO — Tanque (El Primo/Bull-like)
+ *    Alta vida, rápido, ataque corpo-a-corpo em arco curto.
+ *    Super: salto invulnerável que causa dano e atordoa ao aterrissar.
+ */
+const bruto: BrawlerDef = {
+  id: 'bruto',
+  name: 'Bruto',
+  role: 'Tanque',
+  blurb: 'Monstro corpo-a-corpo com vida gigante. Super é um salto que atordoa!',
+  maxHp: 6800,
+  speed: 242,
+  radius: 17,
+  bodyColor: '#ff6b35',
+  darkColor: '#993412',
+  accentColor: '#ffe14d',
+  attack: mkAttack('CONE', 400, 3, 22, 700, 95, 18, 1.35, '#ff6b35', 140, false, 0, 0, 0, 0, false),
+  super: {
+    attack: mkAttack('LINEAR', 0, 0, 0, 0, 0, 0, 0, '#ffe14d', 0, false, 0, 0, 0, 0, false),
+    leap: {
+      range: 240,
+      duration: 0.55,
+      landRadius: 112,
+      landDamage: 900,
+      landStun: 1.0,
+      invulnerable: true,
+    },
+  },
+  superDamageNeeded: 1700,
+};
+
+/** Registro de todos os brawlers. */
+export const BRAWLERS: Record<string, BrawlerDef> = {
+  scarlet,
+  hawk,
+  fuse,
+  bruto,
+};
+
+/** Ordem de exibição na seleção. */
+export const BRAWLER_IDS: string[] = ['scarlet', 'hawk', 'fuse', 'bruto'];
+
+/** Nomes aleatórios para bots. */
+export const BOT_NAMES: string[] = [
+  'Zé',
+  'Luna',
+  'Kiko',
+  'Maya',
+  'Rui',
+  'Nina',
+  'Téo',
+  'Ivy',
+  'Duda',
+  'Beto',
+  'Sara',
+  'Vini',
+];
+
+/** Ícones por brawler (avatar do menu). */
+export const BRAWLER_ICONS: Record<string, string> = {
+  scarlet: '💥',
+  hawk: '🎯',
+  fuse: '💣',
+  bruto: '👊',
+};

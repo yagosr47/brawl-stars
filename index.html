@@ -1,15 +1,103 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="pt-BR">
-<head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
-  <meta name="theme-color" content="#0f172a" />
-  <title>Brawl Arena — Arena Brawler</title>
-  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
-  <script type="module" src="/src/main.ts"></script>
-</head>
-<body>
-  <canvas id="gameCanvas" tabindex="0"></canvas>
-  <div id="ui-overlay"></div>
-</body>
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover"
+    />
+    <meta name="theme-color" content="#1a0f2e" />
+    <meta name="description" content="Arena Brawler — jogo de ação 2D top-down estilo Brawl Stars." />
+    <title>⭐ Arena Brawler</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  </head>
+  <body>
+    <canvas id="game-canvas"></canvas>
+
+    <!-- HUD da partida -->
+    <div id="hud" class="hidden">
+      <div class="hud-top">
+        <div class="hud-chip hud-blue">
+          <span class="hud-gem">💎</span>
+          <span id="hud-blue-count">0</span>
+        </div>
+        <div class="hud-chip hud-center-chip">
+          <span id="hud-center-text">0:00</span>
+        </div>
+        <div class="hud-chip hud-red">
+          <span id="hud-red-count">0</span>
+          <span class="hud-gem">💎</span>
+        </div>
+        <div class="hud-actions">
+          <button id="btn-mute" class="icon-btn" type="button" title="Som">🔊</button>
+          <button id="btn-fs" class="icon-btn" type="button" title="Tela cheia (F)">⛶</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Botão SUPER -->
+    <button id="super-btn" class="hidden" type="button">
+      <span class="super-label">SUPER</span>
+    </button>
+
+    <!-- MENU -->
+    <div class="screen" id="screen-menu">
+      <div class="panel menu-panel">
+        <div class="logo">
+          <span class="logo-star">⭐</span>
+          <h1>ARENA<br />BRAWLER</h1>
+        </div>
+        <p class="tagline">Ação 3v3 e Showdown em arenas explosivas!</p>
+        <button id="btn-play" class="btn btn-primary btn-big" type="button">▶ JOGAR</button>
+        <p class="hint">PC: WASD + Mouse &nbsp;•&nbsp; Mobile: Joysticks</p>
+      </div>
+    </div>
+
+    <!-- SELEÇÃO DE MODO -->
+    <div class="screen hidden" id="screen-mode">
+      <div class="panel">
+        <h2 class="panel-title">ESCOLHA O MODO</h2>
+        <div class="mode-grid">
+          <button class="mode-card" data-mode="GEM_GRAB" type="button">
+            <div class="mode-icon">💎</div>
+            <h3>PIQUE-GEMA</h3>
+            <p>3v3 • Segure 10 gemas por 15s para vencer. Morrer derruba tudo!</p>
+          </button>
+          <button class="mode-card" data-mode="SHOWDOWN" type="button">
+            <div class="mode-icon">☠️</div>
+            <h3>COMBATE SOLO</h3>
+            <p>6 jogadores • Cubos de Poder e nuvens tóxicas. Último de pé vence!</p>
+          </button>
+        </div>
+        <button id="btn-back-menu" class="btn btn-ghost" type="button">◀ VOLTAR</button>
+      </div>
+    </div>
+
+    <!-- SELEÇÃO DE BRAWLER -->
+    <div class="screen hidden" id="screen-brawler">
+      <div class="panel">
+        <h2 class="panel-title">ESCOLHA SEU BRAWLER</h2>
+        <div id="brawler-grid" class="brawler-grid"></div>
+        <div class="row">
+          <button id="btn-back-mode" class="btn btn-ghost" type="button">◀ VOLTAR</button>
+          <button id="btn-fight" class="btn btn-primary btn-big" type="button">⚔ LUTAR!</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- GAME OVER -->
+    <div class="screen hidden" id="screen-gameover">
+      <div class="panel">
+        <h2 id="go-title" class="go-title">VITÓRIA!</h2>
+        <p id="go-subtitle" class="go-subtitle"></p>
+        <div id="go-stats" class="go-stats"></div>
+        <div class="row">
+          <button id="btn-again" class="btn btn-primary btn-big" type="button">↻ JOGAR NOVAMENTE</button>
+          <button id="btn-go-menu" class="btn btn-ghost" type="button">🏠 MENU</button>
+        </div>
+      </div>
+    </div>
+
+    <script type="module" src="/src/main.ts"></script>
+  </body>
 </html>

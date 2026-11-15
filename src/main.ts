@@ -1,295 +1,250 @@
-import type {
-  Brawler, Projectile, Gem, PowerCube, Particle, Tile,
-  GameState, GameMode, BrawlerId, Team, GameScreen,
-} from './types.js';
-import { BRAWLERS, makeBrawler } from './brawlers.js';
-import { TILE_SIZE, MAP_COLS, MAP_ROWS, MAP_WIDTH, MAP_HEIGHT, GAME, PHYSICS, BALANCE, lerp, clamp, dist, distSq, normalize } from './constants.js';
-import { generateMap, getTileAt } from './map.js';
-import { resolveCircleVsTiles, applyKnockback, updateKnockback } from './physics.js';
-import { BotAI } from './ai.js';
-import { playSound } from './audio.js';
-import { Renderer } from './renderer.js';
-import { Input } from './input.js';
+/* ============================================================
+   ARENA BRAWLER — Game loop, telas, modos de jogo e HUD
+   ============================================================ */
 
-let projectileIdCounter = 0;
+import './style.css';
+import type { AttackDef, Entity, GameMode, GameScreen, Projectile, Vec2, World } from './types';
+import {
+  ATTACK_COOLDOWN,
+  AUTO_AIM_EXTRA_RANGE,
+  CAMERA_LERP,
+  COLOR,
+  CRATE_HP,
+  FIXED_DT_MAX,
+  GEM_COUNTDOWN_TIME,
+  GEM_RESPAWN_TIME,
+  GEM_SPAWN_INTERVAL,
+  GEM_WIN_COUNT,
+  MAP_TILES_X,
+  MAP_TILES_Y,
+  MAX_AMMO,
+  PICKUP_MAGNET,
+  PICKUP_RADIUS,
+  POISON_BASE_DPS,
+  POISON_DAMAGE_TICK,
+  POISON_DPS_GROWTH,
+  POISON_START_DELAY,
+  POISON_STEP_INTERVAL,
+  POWER_CUBE_DMG_BONUS,
+  POWER_CUBE_HP_BONUS,
+  REGEN_DELAY,
+  REGEN_INTERVAL,
+  REGEN_PERCENT,
+  SHAKE_DECAY,
+  SHOWDOWN_CRATE_COUNT,
+  VIEW_HEIGHT,
+  WORLD_HEIGHT,
+  WORLD_WIDTH,
+  clamp,
+  deg2rad,
+  dist,
+  lerp,
+  normalize,
+  pick,
+  randRange,
+} from './constants';
+import { BRAWLERS, BRAWLER_ICONS, BRAWLER_IDS, BOT_NAMES } from './brawlers';
+import { GameMap, getMapCenter, getSpawns } from './map';
+import {
+  applyKnockback,
+  isEntityVisible,
+  moveEntity,
+  projectileHitsTile,
+  resolveCircleTiles,
+  revealEntity,
+} from './physics';
+import { AudioEngine } from './audio';
+import { InputManager, toggleFullscreen } from './input';
+import { updateBotAI, type AIContext } from './ai';
+import { Renderer, type Camera } from './renderer';
 
-function nextProjectileId(): number {
-  projectileIdCounter++;
-  return projectileIdCounter;
+/* ============================ HELPERS ============================ */
+
+function el<T extends HTMLElement>(id: string): T {
+  const node = document.getElementById(id);
+  if (!node) throw new Error(`Elemento #${id} não encontrado`);
+  return node as T;
 }
 
-function makeProjectile(
-  pos: { x: number; y: number },
-  dir: { x: number; y: number },
-  speed: number,
-  damage: number,
-  lifetime: number,
-  radius: number,
-  type: Projectile['type'],
-  ownerTeam: Team,
-  pierce: number,
-  explodeRadius: number,
-  lobbed: boolean,
-  arcHeight: number,
-): Projectile {
+function createEntity(
+  def: Entity['def'],
+  name: string,
+  team: Entity['team'],
+  isBot: boolean,
+  pos: Vec2,
+  id: number,
+): Entity {
   return {
-    id: nextProjectileId(),
-    pos: { ...pos },
-    vel: { x: dir.x * speed, y: dir.y * speed },
-    damage,
-    ownerId: -1,
-    ownerTeam,
-    lifetime,
-    maxLifetime: lifetime,
-    radius,
-    type,
-    speed,
-    pierce,
-    explosive: explodeRadius > 0,
-    explodeRadius,
-    lobbed,
-    arcHeight,
-    bounced: 0,
-    markForRemoval: false,
+    id,
+    def,
+    name,
+    team,
+    isBot,
+    pos: { x: pos.x, y: pos.y },
+    vel: { x: 0, y: 0 },
+    facing: team === 'RED' ? Math.PI : 0,
+    radius: def.radius,
+    hp: def.maxHp,
+    maxHp: def.maxHp,
+    speed: def.speed,
+    ammo: MAX_AMMO,
+    attackCooldown: 0,
+    timeSinceAttack: 99,
+    timeSinceDamage: 99,
+    regenTick: 0,
+    superCharge: 0,
+    gems: 0,
+    powerCubes: 0,
+    stunTimer: 0,
+    revealTimer: 0,
+    invulnTimer: 1,
+    hitFlash: 0,
+    alive: true,
+    respawnTimer: 0,
+    eliminated: false,
+    knockback: { x: 0, y: 0 },
+    jump: { active: false, from: { x: 0, y: 0 }, to: { x: 0, y: 0 }, t: 0, duration: 1 },
+    aiState: 'IDLE',
+    aiTimer: 0,
+    aiTargetId: -1,
+    aiStrafeDir: Math.random() < 0.5 ? 1 : -1,
+    wanderTarget: { x: pos.x, y: pos.y },
+    stats: { kills: 0, damageDealt: 0, gemsCollected: 0 },
   };
 }
 
-function createProjectile(owner: Brawler, targetPos: { x: number; y: number }): Projectile[] {
-  const stats = owner.stats;
-  const start = { ...owner.pos };
-  const dir = normalize({ x: targetPos.x - start.x, y: targetPos.y - start.y });
-  const projectiles: Projectile[] = [];
+/* ============================ GAME ============================ */
 
-  if (owner.attackType === 'CONE' && owner.id === 'SHELLY') {
-    const count = 5;
-    const spread = 0.34;
-    for (let i = 0; i < count; i++) {
-      const t = (i - (count - 1) / 2) * spread;
-      const c = Math.cos(t);
-      const s = Math.sin(t);
-      const d = { x: dir.x * c - dir.y * s, y: dir.x * s + dir.y * c };
-      projectiles.push(makeProjectile(start, d, stats.projectileSpeed, stats.attackDamage, stats.projectileLifetime, 6, 'CONE', owner.team, 0, 0, false, 0));
-    }
-  } else if (owner.attackType === 'LINEAR') {
-    projectiles.push(makeProjectile(start, dir, stats.projectileSpeed, stats.attackDamage, stats.projectileLifetime, 5, 'LINEAR', owner.team, 0, 0, false, 0));
-  } else if (owner.attackType === 'LOBBED') {
-    projectiles.push(makeProjectile(start, dir, stats.projectileSpeed, stats.attackDamage, stats.projectileLifetime, 10, 'LOBBED', owner.team, 0, 90, true, 150));
-  } else if (owner.attackType === 'CONE' && owner.id === 'ELPRIMO') {
-    const reach = stats.attackRange;
-    projectiles.push(makeProjectile(start, dir, 0, stats.attackDamage, 0.18, reach, 'CONE', owner.team, 0, 0, false, 0));
-  }
-
-  return projectiles;
-}
-
-function createSuperProjectiles(owner: Brawler, targetPos: { x: number; y: number }): Projectile[] {
-  const projectiles: Projectile[] = [];
-  const start = { ...owner.pos };
-  const dir = normalize({ x: targetPos.x - start.x, y: targetPos.y - start.y });
-
-  if (owner.superType === 'PIERCE_BURST') {
-    for (let i = -2; i <= 2; i++) {
-      const angle = (i / 4) * 0.5;
-      const c = Math.cos(angle);
-      const s = Math.sin(angle);
-      const d = { x: dir.x * c - dir.y * s, y: dir.x * s + dir.y * c };
-      projectiles.push(makeProjectile(start, d, 1500, owner.stats.superDamage, 1.4, 5, 'LINEAR', owner.team, 5, 0, false, 0));
-    }
-  } else if (owner.superType === 'MULTI_EXPLOSIVE') {
-    const count = 8;
-    for (let i = 0; i < count; i++) {
-      const angle = (i / count) * Math.PI * 2;
-      projectiles.push(makeProjectile(start, { x: Math.cos(angle), y: Math.sin(angle) }, 450, owner.stats.superDamage, 2.2, 8, 'LOBBED', owner.team, 0, 70, true, 120));
-    }
-  }
-
-  return projectiles;
-}
-
-function spawnGem(): Gem {
-  const tx = 2 + Math.floor(Math.random() * (MAP_COLS - 4));
-  const ty = 2 + Math.floor(Math.random() * (MAP_ROWS - 4));
-  return { pos: { x: tx * TILE_SIZE + TILE_SIZE / 2, y: ty * TILE_SIZE + TILE_SIZE / 2 }, value: 1, collected: false };
-}
-
-function spawnPowerCube(): PowerCube {
-  const tx = 2 + Math.floor(Math.random() * (MAP_COLS - 4));
-  const ty = 2 + Math.floor(Math.random() * (MAP_ROWS - 4));
-  return { pos: { x: tx * TILE_SIZE + TILE_SIZE / 2, y: ty * TILE_SIZE + TILE_SIZE / 2 }, collected: false };
-}
-
-export class Game {
-  private canvas: HTMLCanvasElement;
-  private ui: HTMLElement;
+class Game {
+  private canvas = el<HTMLCanvasElement>('game-canvas');
   private renderer: Renderer;
-  private input: Input;
-  private state: GameState;
-  private mode: GameMode | null = null;
-  private lastTime: number = performance.now();
-  private animFrame: number | null = null;
-  private running = false;
-  private ai = new BotAI();
+  private input: InputManager;
+  private audio = new AudioEngine();
+
+  private map: GameMap | null = null;
+  private world: World | null = null;
+  private player: Entity | null = null;
+  private cam: Camera = { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2, zoom: 1, trauma: 0 };
+  private camTarget: Vec2 = { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 };
+
   private screen: GameScreen = 'MENU';
-  private menuMode: GameMode | null = null;
-  private selectedBrawler: BrawlerId | null = null;
-  private toxicRadius = 0;
-  private toxicDamageTimer = 0;
-  private shakeTrauma = 0;
-  private countdownTimer = 0;
-  private showCountdown = false;
-  private winner: Team | null = null;
-  private gemsHeld = { BLUE: 0, RED: 0 };
-  private player: Brawler | null = null;
-  private playerId = 0;
+  private selectedMode: GameMode = 'GEM_GRAB';
+  private selectedBrawler = 'scarlet';
+  private lastTime = performance.now();
+  private poisonDmgAcc = 0;
+
+  private aiCtx: AIContext = {
+    fire: (e, angle, useSuper, targetPos) => this.fireWeapon(e, angle, useSuper, targetPos),
+  };
 
   constructor() {
-    this.canvas = document.getElementById('gameCanvas') as HTMLCanvasElement;
-    this.ui = document.getElementById('ui-overlay') as HTMLElement;
-    this.canvas.width = window.innerWidth;
-    this.canvas.height = window.innerHeight;
     this.renderer = new Renderer(this.canvas);
-    this.input = new Input(this.canvas);
-    this.state = this.createInitialState();
-    this.input.setSuperHandler(() => this.handleSuperTap());
-    this.setupUI();
-    this.resize();
-    window.addEventListener('resize', () => this.resize());
-    this.canvas.focus();
+    this.input = new InputManager(this.canvas, el('super-btn'));
   }
 
-  private createInitialState(): GameState {
-    return {
-      screen: 'MENU',
-      mode: null,
-      playerTeam: 'BLUE',
-      playerBrawler: null,
-      brawlers: [],
-      projectiles: [],
-      gems: [],
-      powerCubes: [],
-      particles: [],
-      damageNumbers: [],
-      tiles: generateMap(),
-      mapWidth: MAP_WIDTH,
-      mapHeight: MAP_HEIGHT,
-      tileSize: TILE_SIZE,
-      camera: { x: MAP_WIDTH / 2, y: MAP_HEIGHT / 2 },
-      shakeTrauma: 0,
-      time: 0,
-      gemSpawnTimer: 0,
-      toxicCloudRadius: 0,
-      winner: null,
-      gemsHeld: { BLUE: 0, RED: 0 },
-      gemCountdown: 0,
-      showCountdown: false,
-    };
+  init(): void {
+    this.buildBrawlerGrid();
+    this.wireUI();
+    this.setScreen('MENU');
+    requestAnimationFrame(this.loop);
   }
 
-  private setupUI(): void {
-    this.ui.innerHTML = `
-      <div class="hud hidden" id="hud">
-        <div class="hud-top">
-          <div class="hud-player">
-            <div class="hud-label">Vida</div>
-            <div class="hud-health-bar"><div class="hud-health-fill" id="healthFill"></div></div>
-            <div class="hud-ammo" id="ammoSlots"></div>
-          </div>
-          <div class="hud-super">
-            <div class="hud-label">Super</div>
-            <div class="hud-super-bar"><div class="hud-super-fill" id="superFill"></div></div>
-            <div class="hud-super-ready" id="superReady">SUPER PRONTO</div>
-          </div>
-          <div class="hud-right">
-            <div class="hud-mode-info">
-              <div class="hud-mode-title" id="modeTitle">Modo</div>
-              <div class="hud-mode-sub" id="modeSub"></div>
-            </div>
-            <div class="hud-gem-counter" id="gemCounter" style="display:none">
-              <div class="hud-gem-icon"></div><div class="hud-gem-count" id="gemCount">0</div>
-            </div>
-          </div>
-        </div>
-        <div class="hud-bottom">
-          <div class="mobile-controls" id="mobileControls">
-            <div class="joystick" id="moveJoystick"><div class="joystick-knob" id="moveKnob"></div></div>
-            <div class="aim-joystick" id="aimJoystick"><div class="aim-reticle" id="aimReticle"></div></div>
-            <div class="action-button super" id="superBtn">SUPER</div>
-          </div>
-        </div>
-      </div>
+  /* ----------------------- UI / Telas ----------------------- */
 
-      <div class="screen active" id="screenMenu">
-        <div class="screen-title">BRAWL ARENA</div>
-        <div class="screen-subtitle">Arena Brawler Top-Down 2D</div>
-        <div class="btn-row">
-          <button class="btn" id="btnGemGrab">Pique-Gema (3v3)</button>
-          <button class="btn btn-secondary" id="btnShowdown">Combate Solo (6p)</button>
-        </div>
-        <div class="game-info">WASD/Setas: mover • Mouse: mirar • Clique: atirar • Direito/Espaço: Super • F: tela cheia</div>
-      </div>
+  private wireUI(): void {
+    const muteBtn = el<HTMLButtonElement>('btn-mute');
+    const fsBtn = el<HTMLButtonElement>('btn-fs');
 
-      <div class="screen hidden" id="screenMode">
-        <div class="screen-title">Escolha o Modo</div>
-        <div class="screen-subtitle">Selecione a partida</div>
-        <div class="btn-row">
-          <button class="btn" id="modeGemGrab">Pique-Gema (3v3)</button>
-          <button class="btn btn-secondary" id="modeShowdown">Combate Solo (Showdown)</button>
-        </div>
-        <button class="btn btn-secondary" style="margin-top:16px" id="btnBackMenu">Voltar</button>
-      </div>
-
-      <div class="screen hidden" id="screenBrawler">
-        <div class="screen-title">Escolha o Brawler</div>
-        <div class="screen-subtitle">Seu lutador na arena</div>
-        <div class="brawler-grid" id="brawlerGrid"></div>
-        <div class="btn-row" style="margin-top:24px; align-items:center">
-          <button class="btn btn-secondary" id="brawlerBack">Voltar</button>
-          <button class="btn" id="brawlerConfirm" style="margin-left:auto">Confirmar</button>
-        </div>
-      </div>
-
-      <div class="screen hidden" id="screenGameOver">
-        <div class="game-over-result result-victory" id="goResult">VITÓRIA</div>
-        <div class="game-over-stats" id="goStats"></div>
-        <div class="btn-row">
-          <button class="btn" id="goMainMenu">Menu Principal</button>
-        </div>
-      </div>
-
-      <div class="msg-banner" id="msgBanner"><div class="msg-text" id="msgText"></div></div>
-    `;
-
-    document.getElementById('btnGemGrab')!.addEventListener('click', () => this.selectMode('GEM_GRAB'));
-    document.getElementById('btnShowdown')!.addEventListener('click', () => this.selectMode('SHOWDOWN'));
-    document.getElementById('modeGemGrab')!.addEventListener('click', () => this.selectMode('GEM_GRAB'));
-    document.getElementById('modeShowdown')!.addEventListener('click', () => this.selectMode('SHOWDOWN'));
-    document.getElementById('btnBackMenu')!.addEventListener('click', () => this.showScreen('MENU'));
-    document.getElementById('brawlerBack')!.addEventListener('click', () => this.showScreen('MODE_SELECT'));
-    document.getElementById('brawlerConfirm')!.addEventListener('click', () => this.confirmBrawler());
-    document.getElementById('goMainMenu')!.addEventListener('click', () => this.showScreen('MENU'));
-
-    document.getElementById('superBtn')!.addEventListener('pointerdown', (e) => {
-      e.preventDefault();
-      this.handleSuperTap();
+    el('btn-play').addEventListener('click', () => {
+      this.audio.unlock();
+      this.audio.uiClick();
+      this.setScreen('MODE_SELECT');
     });
 
-    this.buildBrawlerGrid();
+    document.querySelectorAll<HTMLButtonElement>('.mode-card').forEach((btn) => {
+      btn.addEventListener('click', () => {
+        this.audio.unlock();
+        this.audio.uiClick();
+        this.selectedMode = btn.dataset.mode === 'SHOWDOWN' ? 'SHOWDOWN' : 'GEM_GRAB';
+        this.setScreen('BRAWLER_SELECT');
+      });
+    });
+
+    el('btn-back-menu').addEventListener('click', () => {
+      this.audio.uiClick();
+      this.setScreen('MENU');
+    });
+    el('btn-back-mode').addEventListener('click', () => {
+      this.audio.uiClick();
+      this.setScreen('MODE_SELECT');
+    });
+    el('btn-fight').addEventListener('click', () => {
+      this.audio.unlock();
+      this.audio.uiClick();
+      this.startMatch();
+    });
+    el('btn-again').addEventListener('click', () => {
+      this.audio.uiClick();
+      this.startMatch();
+    });
+    el('btn-go-menu').addEventListener('click', () => {
+      this.audio.uiClick();
+      this.setScreen('MENU');
+    });
+
+    muteBtn.addEventListener('click', () => {
+      this.audio.unlock();
+      this.audio.setEnabled(!this.audio.enabled);
+      muteBtn.textContent = this.audio.enabled ? '🔊' : '🔇';
+    });
+    fsBtn.addEventListener('click', () => {
+      this.audio.uiClick();
+      toggleFullscreen();
+    });
+
+    window.addEventListener('pointerdown', () => this.audio.unlock(), { once: true });
+    window.addEventListener('keydown', () => this.audio.unlock(), { once: true });
+  }
+
+  private setScreen(screen: GameScreen): void {
+    this.screen = screen;
+    const map: Record<GameScreen, string> = {
+      MENU: 'screen-menu',
+      MODE_SELECT: 'screen-mode',
+      BRAWLER_SELECT: 'screen-brawler',
+      PLAYING: 'screen-playing',
+      GAME_OVER: 'screen-gameover',
+    };
+    for (const id of ['screen-menu', 'screen-mode', 'screen-brawler', 'screen-gameover']) {
+      el(id).classList.add('hidden');
+    }
+    const target = map[screen];
+    if (target !== 'screen-playing') el(target).classList.remove('hidden');
   }
 
   private buildBrawlerGrid(): void {
-    const grid = document.getElementById('brawlerGrid')!;
+    const grid = el('brawler-grid');
     grid.innerHTML = '';
-    for (const id of Object.keys(BRAWLERS) as BrawlerId[]) {
+    for (const id of BRAWLER_IDS) {
       const def = BRAWLERS[id];
-      const card = document.createElement('div');
-      card.className = 'brawler-card' + (this.selectedBrawler === id ? ' selected' : '');
+      const card = document.createElement('button');
+      card.type = 'button';
+      card.className = 'brawler-card' + (id === this.selectedBrawler ? ' selected' : '');
+      const hpPct = clamp((def.maxHp / 7000) * 100, 10, 100);
+      const dmgPct = clamp(((def.attack.damage * def.attack.projectileCount) / 1300) * 100, 10, 100);
+      const rangePct = clamp((def.attack.range / 430) * 100, 10, 100);
       card.innerHTML = `
-        <div class="brawler-color-chip" style="background:${def.color}"></div>
+        <div class="brawler-avatar" style="background:${def.bodyColor}">${BRAWLER_ICONS[id]}</div>
         <div class="brawler-name">${def.name}</div>
-        <div class="brawler-archetype">${def.archetype}</div>
-        <div class="brawler-stats">${def.description}</div>
+        <div class="brawler-role">${def.role}</div>
+        <div class="brawler-blurb">${def.blurb}</div>
+        <div class="brawler-stat"><span>❤️</span><div class="stat-bar"><i style="width:${hpPct}%"></i></div></div>
+        <div class="brawler-stat"><span>⚔️</span><div class="stat-bar"><i style="width:${dmgPct}%"></i></div></div>
+        <div class="brawler-stat"><span>🎯</span><div class="stat-bar"><i style="width:${rangePct}%"></i></div></div>
       `;
       card.addEventListener('click', () => {
+        this.audio.unlock();
+        this.audio.uiClick();
         this.selectedBrawler = id;
         this.buildBrawlerGrid();
       });
@@ -297,774 +252,1035 @@ export class Game {
     }
   }
 
-  private selectMode(mode: GameMode): void {
-    this.menuMode = mode;
-    this.showScreen('BRAWLER_SELECT');
-  }
+  /* ----------------------- Partida ----------------------- */
 
-  private confirmBrawler(): void {
-    if (!this.selectedBrawler || !this.menuMode) return;
-    this.startGame(this.menuMode, this.selectedBrawler);
-  }
-
-  private startGame(mode: GameMode, brawlerId: BrawlerId): void {
-    this.mode = mode;
-    this.selectedBrawler = brawlerId;
-    this.state = this.createInitialState();
-    this.state.mode = mode;
-    this.state.playerTeam = 'BLUE';
-    this.state.playerBrawler = brawlerId;
-    this.state.tiles = generateMap();
-    this.toxicRadius = 0;
-    this.toxicDamageTimer = 0;
-    this.gemsHeld = { BLUE: 0, RED: 0 };
-    this.winner = null;
-    this.countdownTimer = 0;
-    this.showCountdown = false;
-    this.ai = new BotAI();
-
-    const centerX = MAP_WIDTH / 2;
-    const centerY = MAP_HEIGHT / 2;
-
-    const spawns: { x: number; y: number }[] = [
-      { x: centerX - 300, y: centerY - 300 },
-      { x: centerX + 300, y: centerY + 300 },
-      { x: centerX - 300, y: centerY + 300 },
-      { x: centerX + 300, y: centerY - 300 },
-      { x: centerX - 200, y: centerY + 200 },
-      { x: centerX + 200, y: centerY - 200 },
-    ];
-
-    this.player = makeBrawler(brawlerId, 'BLUE', spawns[0], false);
-    this.playerId = 0;
-    this.state.brawlers.push(this.player);
-
-    const teams: Team[] = ['RED', 'RED', 'BLUE', 'BLUE', 'RED', 'BLUE'];
-    const ids: BrawlerId[] = ['COLT', 'BARLEY', 'ELPRIMO', 'SHELLY', 'COLT'];
-    for (let i = 1; i < 6; i++) {
-      const bot = makeBrawler(ids[i - 1], teams[i - 1], spawns[i], true);
-      this.state.brawlers.push(bot);
-    }
-
-    if (mode === 'GEM_GRAB') {
-      this.state.gems.push(spawnGem());
-    }
-
-    if (mode === 'SHOWDOWN') {
-      for (let i = 0; i < 10; i++) {
-        this.state.powerCubes.push(spawnPowerCube());
-      }
-    }
-
-    this.showScreen('PLAYING');
-    this.lastTime = performance.now();
-    if (!this.running) {
-      this.running = true;
-      this.animFrame = requestAnimationFrame(() => this.loop());
-    }
-  }
-
-  private showScreen(screen: GameScreen): void {
-    this.screen = screen;
-    const ids: Record<GameScreen, string> = {
-      MENU: 'screenMenu',
-      MODE_SELECT: 'screenMode',
-      BRAWLER_SELECT: 'screenBrawler',
-      PLAYING: 'screenGameOver',
-      GAME_OVER: 'screenGameOver',
+  private startMatch(): void {
+    const map = new GameMap();
+    this.map = map;
+    const spawns = getSpawns(this.selectedMode);
+    const world: World = {
+      map,
+      mode: this.selectedMode,
+      time: 0,
+      entities: [],
+      projectiles: [],
+      pickups: [],
+      crates: [],
+      particles: [],
+      floaters: [],
+      spawnPoints: spawns,
+      gemTimer: GEM_SPAWN_INTERVAL * 0.4,
+      countdown: 0,
+      countdownActive: false,
+      countdownTeam: 'NEUTRAL',
+      poisonRadius: Math.max(MAP_TILES_X, MAP_TILES_Y) / 2 + 2,
+      poisonTimer: 0,
+      poisonLevel: 0,
+      nextId: 1,
+      gameOver: false,
+      winner: '',
+      result: 'DEFEAT',
+      playerPlacement: 0,
     };
-    for (const [s, id] of Object.entries(ids)) {
-      const el = document.getElementById(id);
-      if (el) el.classList.toggle('hidden', s !== screen);
-    }
-    const hud = document.getElementById('hud');
-    if (hud) hud.classList.toggle('hidden', screen !== 'PLAYING');
-    this.state.screen = screen;
-  }
+    this.world = world;
+    this.poisonDmgAcc = 0;
 
-  private resize(): void {
-    this.canvas.width = window.innerWidth;
-    this.canvas.height = window.innerHeight;
-    this.renderer.resize(this.canvas.width, this.canvas.height);
-    this.input.updateLayout();
-  }
+    const playerDef = BRAWLERS[this.selectedBrawler];
+    const otherIds = BRAWLER_IDS.filter((id) => id !== this.selectedBrawler);
+    let playerEntity: Entity;
 
-  private handleSuperTap(): void {
-    if (this.screen !== 'PLAYING' || !this.player) return;
-    const p = this.player;
-    if (p.superCharge < p.maxSuperCharge || p.isSuperActive) return;
-    this.activateSuper(p);
-  }
-
-  private activateSuper(p: Brawler): void {
-    p.isSuperActive = true;
-    p.superActiveTime = 0;
-    p.superCharge = 0;
-    playSound('SUPER', 0.6);
-
-    if (p.superType === 'WALL_BREAK') {
-      const radius = 260;
-      const center = { ...p.pos };
-      const tilesToBreak = this.getTilesInRadius(center, radius);
-      for (const t of tilesToBreak) {
-        if (t.type === 'WALL_DESTRUCTIBLE') {
-          t.type = 'FLOOR';
-          t.hp = 0;
-          this.spawnExplosionParticles({ x: t.x * TILE_SIZE + TILE_SIZE / 2, y: t.y * TILE_SIZE + TILE_SIZE / 2 }, '#94a3b8', 8);
-        }
+    if (world.mode === 'GEM_GRAB') {
+      playerEntity = createEntity(playerDef, 'Você', 'BLUE', false, spawns.BLUE[0], world.nextId++);
+      world.entities.push(playerEntity);
+      for (let i = 0; i < 2; i++) {
+        const def = BRAWLERS[otherIds[i % otherIds.length]];
+        world.entities.push(
+          createEntity(def, pick(BOT_NAMES), 'BLUE', true, spawns.BLUE[i + 1], world.nextId++),
+        );
       }
-      for (const b of this.state.brawlers) {
-        if (b.team !== p.team && dist(b.pos, center) < radius && b.health > 0) {
-          const dir = normalize({ x: b.pos.x - center.x, y: b.pos.y - center.y });
-          applyKnockback(b, dir, 420, 0.5);
-          this.damageBrawler(b, 400, p);
-        }
+      for (let i = 0; i < 3; i++) {
+        const def = BRAWLERS[pick(otherIds)];
+        world.entities.push(
+          createEntity(def, pick(BOT_NAMES), 'RED', true, spawns.RED[i], world.nextId++),
+        );
       }
-      playSound('WALL_BREAK', 0.6);
-    } else if (p.superType === 'PIERCE_BURST') {
-      const projs = createSuperProjectiles(p, { x: p.pos.x + p.facing.x * 600, y: p.pos.y + p.facing.y * 600 });
-      for (const pr of projs) { pr.ownerId = this.playerId; this.state.projectiles.push(pr); }
-    } else if (p.superType === 'MULTI_EXPLOSIVE') {
-      const projs = createSuperProjectiles(p, { x: p.pos.x, y: p.pos.y });
-      for (const pr of projs) { pr.ownerId = this.playerId; this.state.projectiles.push(pr); }
-    } else if (p.superType === 'JUMP') {
-      const jumpDist = 500;
-      p.pos.x += p.facing.x * jumpDist;
-      p.pos.y += p.facing.y * jumpDist;
-      p.stunTime = PHYSICS.STUN_DURATION;
-      this.spawnExplosionParticles(p.pos, '#fbbf24', 24);
-      this.dealSuperJumpDamage(p);
-    }
-  }
-
-  private dealSuperJumpDamage(p: Brawler): void {
-    const radius = 180;
-    for (const b of this.state.brawlers) {
-      if (b.team === p.team || b.health <= 0) continue;
-      if (dist(b.pos, p.pos) < radius) {
-        b.health = Math.max(0, b.health - p.stats.superDamage);
-        b.stunTime = PHYSICS.STUN_DURATION;
-        applyKnockback(b, normalize({ x: b.pos.x - p.pos.x, y: b.pos.y - p.pos.y }), 300, 0.4);
-        this.addDamageNumber(b.pos, Math.round(p.stats.superDamage), '#fb7185');
-        if (b.health <= 0) this.onBrawlerDeath(b);
-      }
-    }
-    playSound('IMPACT', 0.6);
-  }
-
-  private getTilesInRadius(center: { x: number; y: number }, radius: number): Tile[] {
-    const found: Tile[] = [];
-    const minTx = Math.floor((center.x - radius) / TILE_SIZE) - 1;
-    const maxTx = Math.floor((center.x + radius) / TILE_SIZE) + 1;
-    const minTy = Math.floor((center.y - radius) / TILE_SIZE) - 1;
-    const maxTy = Math.floor((center.y + radius) / TILE_SIZE) + 1;
-    for (let ty = minTy; ty <= maxTy; ty++) {
-      for (let tx = minTx; tx <= maxTx; tx++) {
-        const t = getTileAt(this.state.tiles, tx * TILE_SIZE, ty * TILE_SIZE, TILE_SIZE);
-        if (t) found.push(t);
-      }
-    }
-    return found;
-  }
-
-  private spawnExplosionParticles(pos: { x: number; y: number }, color: string, count: number): void {
-    const spawned: Particle[] = [];
-    for (let i = 0; i < count; i++) {
-      const angle = Math.random() * Math.PI * 2;
-      const speed = Math.random() * 90 + 30;
-      const life = Math.random() * 0.4 + 0.3;
-      const p: Particle = {
-        pos: { ...pos },
-        vel: { x: Math.cos(angle) * speed, y: Math.sin(angle) * speed },
-        life,
-        maxLife: life,
-        color,
-        size: Math.random() * 4 + 3,
-      };
-      spawned.push(p);
-      this.state.particles.push(p);
-    }
-  }
-
-  private damageBrawler(target: Brawler, amount: number, attacker: Brawler | null): void {
-    if (target.health <= 0) return;
-    target.health = Math.max(0, target.health - amount);
-    target.revealTime = PHYSICS.BUSH_REVEAL_TIME;
-    target.lastDamageTime = performance.now();
-    target.regenTimer = 0;
-    this.addDamageNumber(target.pos, Math.round(amount), '#fb7185');
-    if (attacker) {
-      attacker.superCharge = Math.min(attacker.maxSuperCharge, attacker.superCharge + BALANCE.SUPER_CHARGE_PER_HIT);
-    }
-    target.superCharge = Math.min(target.maxSuperCharge, target.superCharge + BALANCE.SUPER_CHARGE_PER_HIT_TAKEN);
-    if (target.health <= 0) {
-      this.onBrawlerDeath(target);
     } else {
-      this.shakeTrauma = Math.min(1, this.shakeTrauma + 0.12);
-    }
-  }
-
-  private onBrawlerDeath(b: Brawler): void {
-    if (b.team === 'RED') {
-      this.spawnExplosionParticles(b.pos, '#ef4444', 16);
-      playSound('DEFEAT', 0.5);
-    }
-    if (this.mode === 'GEM_GRAB') {
-      const gemsToDrop = this.gemsHeld[b.team];
-      this.gemsHeld[b.team] = 0;
-      for (let i = 0; i < gemsToDrop; i++) {
-        const angle = Math.random() * Math.PI * 2;
-        this.state.gems.push({
-          pos: { x: b.pos.x + Math.cos(angle) * 8, y: b.pos.y + Math.sin(angle) * 8 },
-          value: 1,
-          collected: false,
+      playerEntity = createEntity(playerDef, 'Você', 'NEUTRAL', false, spawns.NEUTRAL[0], world.nextId++);
+      world.entities.push(playerEntity);
+      for (let i = 1; i < spawns.NEUTRAL.length; i++) {
+        const def = BRAWLERS[pick(otherIds)];
+        world.entities.push(
+          createEntity(def, pick(BOT_NAMES), 'NEUTRAL', true, spawns.NEUTRAL[i], world.nextId++),
+        );
+      }
+      const spots = map.findCrateSpots(SHOWDOWN_CRATE_COUNT);
+      for (const s of spots) {
+        world.crates.push({
+          id: world.nextId++,
+          pos: { x: s.x, y: s.y },
+          hp: CRATE_HP,
+          maxHp: CRATE_HP,
+          radius: 22,
+          hitFlash: 0,
         });
       }
     }
-    setTimeout(() => this.respawnBrawler(b), 4000);
+
+    this.player = playerEntity;
+    this.cam.x = playerEntity.pos.x;
+    this.cam.y = playerEntity.pos.y;
+    this.cam.trauma = 0;
+    this.camTarget = { x: playerEntity.pos.x, y: playerEntity.pos.y };
+    this.setScreen('PLAYING');
   }
 
-  private respawnBrawler(b: Brawler): void {
-    const centerX = MAP_WIDTH / 2;
-    const centerY = MAP_HEIGHT / 2;
-    const spawns: { x: number; y: number }[] = [
-      { x: centerX - 300, y: centerY - 300 },
-      { x: centerX + 300, y: centerY + 300 },
-      { x: centerX - 300, y: centerY + 300 },
-      { x: centerX + 300, y: centerY - 300 },
-    ];
-    const teamSpawns = b.team === 'BLUE' ? [spawns[0], spawns[2]] : [spawns[1], spawns[3]];
-    const spawn = teamSpawns[Math.floor(Math.random() * teamSpawns.length)];
-    b.pos = { ...spawn };
-    b.vel = { x: 0, y: 0 };
-    b.health = b.maxHealth;
-    b.powerCubes = 0;
-    b.stunTime = 0;
-    b.revealTime = 0;
+  /* ----------------------- Game loop ----------------------- */
+
+  private loop = (now: number): void => {
+    requestAnimationFrame(this.loop);
+    const dt = Math.min((now - this.lastTime) / 1000, FIXED_DT_MAX);
+    this.lastTime = now;
+
+    if (this.screen === 'PLAYING' && this.world && !this.world.gameOver) {
+      this.update(dt);
+    } else if (this.world) {
+      this.cam.trauma = Math.max(0, this.cam.trauma - SHAKE_DECAY * dt);
+    }
+    this.render();
+    this.updateHUD();
+  };
+
+  private render(): void {
+    const showAim =
+      this.screen === 'PLAYING' &&
+      !!this.player &&
+      this.player.alive &&
+      (this.input.aiming || (this.input.mouse.active && !this.input.touchMode));
+    this.renderer.draw(this.world, this.player, this.cam, this.input, showAim);
   }
 
-  private addDamageNumber(pos: { x: number; y: number }, text: number | string, color: string): void {
-    this.state.damageNumbers.push({
-      pos: { x: pos.x, y: pos.y - 20 },
-      text: String(text),
-      life: 1.0,
-      maxLife: 1.0,
-      color,
-      vel: { x: 0, y: -40 },
-    });
-  }
+  /* ----------------------- Update ----------------------- */
 
   private update(dt: number): void {
-    if (this.screen !== 'PLAYING') return;
-    const p = this.player;
-    if (!p) return;
+    const world = this.world;
+    const player = this.player;
+    const map = this.map;
+    if (!world || !player || !map) return;
 
-    this.state.time += dt;
-    this.shakeTrauma = Math.max(0, this.shakeTrauma - dt * 2.5);
+    world.time += dt;
+    this.input.poll();
 
-    this.updateInputMovement(p, dt);
-    this.updateBrawler(p, dt);
+    if (player.alive && !player.eliminated) {
+      this.handlePlayerInput();
+    } else {
+      // Descarta ações enfileiradas enquanto morto (evita disparo fantasma no respawn).
+      this.input.takeFire();
+      this.input.takeSuper();
+    }
 
-    const now = performance.now();
+    for (const e of world.entities) {
+      if (e.isBot && e.alive && !e.eliminated) updateBotAI(e, world, this.aiCtx, dt);
+    }
 
-    if (p.ammo < p.maxAmmo) {
-      const sinceShot = (now - p.lastShotTime) / 1000;
-      if (sinceShot >= p.stats.reloadTime) {
-        const slotsToFill = Math.floor(sinceShot / p.stats.reloadTime);
-        p.ammo = Math.min(p.maxAmmo, p.ammo + slotsToFill);
-        p.lastShotTime = now - ((sinceShot % p.stats.reloadTime) * 1000);
+    for (const e of world.entities) this.updateEntityTimers(e, dt);
+
+    for (const e of world.entities) {
+      if (!e.alive || e.eliminated) continue;
+      if (e.jump.active) {
+        this.updateJump(e, dt);
+      } else {
+        moveEntity(e, dt, world.map);
       }
-    }
-
-    if (p.superCharge < p.maxSuperCharge) {
-      p.superCharge = Math.min(p.maxSuperCharge, p.superCharge + dt * 16);
-    }
-
-    if ((now - p.lastDamageTime) / 1000 > PHYSICS.REGEN_DELAY && p.health < p.maxHealth) {
-      p.regenTimer += dt;
-      if (p.regenTimer >= PHYSICS.REGEN_INTERVAL) {
-        p.regenTimer = 0;
-        p.health = Math.min(p.maxHealth, p.health + p.maxHealth * PHYSICS.REGEN_AMOUNT);
-      }
-    }
-
-    if (this.input.state.shootJustPressed && p.ammo > 0) {
-      const aim = this.input.getAimWorldPos(this.state.camera);
-      const projs = createProjectile(p, aim);
-      for (const pr of projs) { pr.ownerId = this.playerId; this.state.projectiles.push(pr); }
-      p.ammo--;
-      p.lastShotTime = now;
-      playSound('SHOT', 0.5, p.archetype);
-      p.revealTime = PHYSICS.BUSH_REVEAL_TIME;
-      this.shakeTrauma = Math.min(1, this.shakeTrauma + 0.08);
     }
 
     this.updateProjectiles(dt);
-    this.updateBots(dt);
+    this.updatePickups(dt);
     this.updateParticles(dt);
-    this.updateDamageNumbers(dt);
-    this.updateGems(dt);
-    this.updatePowerCubes(dt);
-    this.updateToxicCloud(dt);
-    this.checkWinConditions(dt);
-
-    const camTargetX = clamp(p.pos.x, this.canvas.width / 2, MAP_WIDTH - this.canvas.width / 2);
-    const camTargetY = clamp(p.pos.y, this.canvas.height / 2, MAP_HEIGHT - this.canvas.height / 2);
-    this.state.camera.x = lerp(this.state.camera.x, camTargetX, dt * 8);
-    this.state.camera.y = lerp(this.state.camera.y, camTargetY, dt * 8);
-    this.renderer.setCamera(this.state.camera.x, this.state.camera.y);
-    this.renderer.setShakeTrauma(this.shakeTrauma);
-    this.renderer.updateShake(dt);
-
-    this.updateHUD();
+    this.updateCrates(dt);
+    this.updateRespawns(dt);
+    this.updateGemGrab(dt);
+    this.updateShowdown(dt);
+    this.updateCamera(dt);
   }
 
-  private updateInputMovement(p: Brawler, dt: number): void {
-    if (p.stunTime > 0) return;
-    const move = this.input.getMoveDir();
-    let vx = move.x * p.stats.moveSpeed;
-    let vy = move.y * p.stats.moveSpeed;
-    if (p.knockbackTime > 0) {
-      vx += p.knockbackVel.x;
-      vy += p.knockbackVel.y;
+  private updateEntityTimers(e: Entity, dt: number): void {
+    e.stunTimer = Math.max(0, e.stunTimer - dt);
+    e.revealTimer = Math.max(0, e.revealTimer - dt);
+    e.invulnTimer = Math.max(0, e.invulnTimer - dt);
+    e.hitFlash = Math.max(0, e.hitFlash - dt);
+    e.attackCooldown = Math.max(0, e.attackCooldown - dt);
+    e.timeSinceAttack += dt;
+    e.timeSinceDamage += dt;
+
+    if (!e.alive || e.eliminated) return;
+
+    // Recarga contínua de munição (3 barras individuais)
+    if (e.ammo < MAX_AMMO) {
+      e.ammo = Math.min(MAX_AMMO, e.ammo + dt / e.def.attack.reloadTime);
     }
-    p.vel = { x: vx, y: vy };
-    const result = resolveCircleVsTiles(p.pos, p.radius, p.vel, this.state.tiles, TILE_SIZE);
-    p.pos = result.pos;
-    p.vel = result.vel;
-    updateKnockback(p, dt);
-    if (move.x !== 0 || move.y !== 0) {
-      p.facing = move;
+
+    // Regeneração passiva
+    if (
+      e.timeSinceAttack >= REGEN_DELAY &&
+      e.timeSinceDamage >= REGEN_DELAY &&
+      e.hp < e.maxHp
+    ) {
+      e.regenTick += dt;
+      if (e.regenTick >= REGEN_INTERVAL) {
+        e.regenTick = 0;
+        const heal = e.maxHp * REGEN_PERCENT;
+        e.hp = Math.min(e.maxHp, e.hp + heal);
+        this.addFloater(e.pos.x, e.pos.y - e.radius - 14, `+${Math.round(heal)}`, COLOR.healText, 14);
+      }
+    } else {
+      e.regenTick = 0;
     }
-    const tile = getTileAt(this.state.tiles, p.pos.x, p.pos.y, TILE_SIZE);
-    p.inBush = tile ? (tile.type === 'BUSH') : false;
   }
 
-  private updateBrawler(b: Brawler, dt: number): void {
-    if (b.knockbackTime > 0) {
-      const result = resolveCircleVsTiles(b.pos, b.radius, b.knockbackVel, this.state.tiles, TILE_SIZE);
-      b.pos = result.pos;
-    }
-    updateKnockback(b, dt);
-    if (b.stunTime > 0) b.stunTime = Math.max(0, b.stunTime - dt);
-    if (b.revealTime > 0) b.revealTime = Math.max(0, b.revealTime - dt);
-    if (b.isSuperActive) {
-      b.superActiveTime += dt;
-      if (b.superActiveTime > 2.0) b.isSuperActive = false;
-    }
-    const tile = getTileAt(this.state.tiles, b.pos.x, b.pos.y, TILE_SIZE);
-    b.inBush = tile ? (tile.type === 'BUSH') : false;
-  }
+  /* ----------------------- Input do jogador ----------------------- */
 
-  private updateBots(dt: number): void {
-    const enemies = this.state.brawlers.filter((b) => b.team !== this.player!.team && b.health > 0);
-    for (const b of this.state.brawlers) {
-      if (!b.isBot || b.health <= 0) continue;
+  private handlePlayerInput(): void {
+    const player = this.player;
+    const world = this.world;
+    if (!player || !world) return;
 
-      const target = this.ai.getAimTarget(b, enemies);
-      if (target) {
-        const d = dist(b.pos, target);
-        if (d < b.stats.attackRange && b.ammo > 0) {
-          const now = performance.now();
-          const sinceShot = (now - b.lastShotTime) / 1000;
-          if (sinceShot >= b.stats.attackCooldown) {
-            const projs = createProjectile(b, target);
-            for (const pr of projs) { pr.ownerId = -2; this.state.projectiles.push(pr); }
-            b.ammo = Math.max(0, b.ammo - 1);
-            b.lastShotTime = now;
-            b.revealTime = PHYSICS.BUSH_REVEAL_TIME;
-          }
+    // Mira via mouse (PC)
+    if (!this.input.aimStick.active && this.input.mouse.active && !this.input.touchMode) {
+      const wx = this.cam.x + (this.input.mouse.x - this.renderer.viewWidth / 2) / this.cam.zoom;
+      const wy = this.cam.y + (this.input.mouse.y - this.renderer.viewHeight / 2) / this.cam.zoom;
+      const n = normalize(wx - player.pos.x, wy - player.pos.y);
+      if (n.x !== 0 || n.y !== 0) {
+        this.input.aimVec = n;
+        this.input.aiming = true;
+      }
+    }
+
+    // Movimento
+    if (player.stunTimer <= 0 && !player.jump.active) {
+      player.vel.x = this.input.moveVec.x * player.speed;
+      player.vel.y = this.input.moveVec.y * player.speed;
+      if ((this.input.moveVec.x !== 0 || this.input.moveVec.y !== 0) && !this.input.aiming) {
+        player.facing = Math.atan2(this.input.moveVec.y, this.input.moveVec.x);
+      }
+    } else {
+      player.vel.x = 0;
+      player.vel.y = 0;
+    }
+    if (this.input.aiming) {
+      player.facing = Math.atan2(this.input.aimVec.y, this.input.aimVec.x);
+    }
+
+    // Tiro normal
+    const fire = this.input.takeFire();
+    if (fire.queued) {
+      let angle = Math.atan2(this.input.aimVec.y, this.input.aimVec.x);
+      let targetPos: Vec2 | undefined;
+      if (fire.autoAim) {
+        const t = this.findAutoAimTarget(player, player.def.attack.range + AUTO_AIM_EXTRA_RANGE);
+        if (t) {
+          targetPos = { x: t.pos.x, y: t.pos.y };
+          angle = Math.atan2(t.pos.y - player.pos.y, t.pos.x - player.pos.x);
         }
       }
+      this.fireWeapon(player, angle, false, targetPos);
+    }
 
-      this.ai.update(b, dt, this.player!, enemies, this.state.projectiles, this.state.gems, this.state.powerCubes, this.state.tiles, TILE_SIZE);
-
-      if (b.superCharge >= b.maxSuperCharge && this.ai.shouldUseSuper(b, enemies)) {
-        const t = this.ai.getAimTarget(b, enemies);
-        if (t && b.superType === 'JUMP') {
-          b.isSuperActive = true;
-          b.superActiveTime = 0;
-          b.superCharge = 0;
-          const dir = normalize({ x: t.x - b.pos.x, y: t.y - b.pos.y });
-          const jumpDist = 400;
-          b.pos.x += dir.x * jumpDist;
-          b.pos.y += dir.y * jumpDist;
-          b.stunTime = PHYSICS.STUN_DURATION;
-          this.dealSuperJumpDamageBot(b);
-        } else if (t) {
-          this.activateSuper(b);
-          const projs = createSuperProjectiles(b, t);
-          for (const pr of projs) { pr.ownerId = -2; this.state.projectiles.push(pr); }
+    // Super
+    const sup = this.input.takeSuper();
+    if (sup.queued) {
+      const leap = player.def.super.leap;
+      const superRange = leap ? leap.range : player.def.super.attack.range;
+      let angle = Math.atan2(this.input.aimVec.y, this.input.aimVec.x);
+      let targetPos: Vec2 | undefined;
+      const wantsAuto = sup.autoAim || (sup.aim.x === 0 && sup.aim.y === 0 && !this.input.mouse.active);
+      if (wantsAuto) {
+        const t = this.findAutoAimTarget(player, superRange + AUTO_AIM_EXTRA_RANGE);
+        if (t) {
+          targetPos = { x: t.pos.x, y: t.pos.y };
+          angle = Math.atan2(t.pos.y - player.pos.y, t.pos.x - player.pos.x);
         }
       }
-      this.updateBrawler(b, dt);
+      if (sup.aim.x !== 0 || sup.aim.y !== 0) {
+        angle = Math.atan2(sup.aim.y, sup.aim.x);
+      }
+      this.fireWeapon(player, angle, true, targetPos);
     }
   }
 
-  private dealSuperJumpDamageBot(b: Brawler): void {
-    const radius = 180;
-    for (const target of this.state.brawlers) {
-      if (target.team === b.team || target.health <= 0) continue;
-      if (dist(target.pos, b.pos) < radius) {
-        target.health = Math.max(0, target.health - b.stats.superDamage);
-        target.stunTime = PHYSICS.STUN_DURATION;
-        applyKnockback(target, normalize({ x: target.pos.x - b.pos.x, y: target.pos.y - b.pos.y }), 300, 0.4);
-        this.addDamageNumber(target.pos, Math.round(b.stats.superDamage), '#fb7185');
-        if (target.health <= 0) this.onBrawlerDeath(target);
+  private findAutoAimTarget(e: Entity, maxRange: number): Entity | null {
+    const world = this.world;
+    if (!world) return null;
+    let best: Entity | null = null;
+    let bestD = maxRange;
+    for (const o of world.entities) {
+      if (o.id === e.id || !o.alive || o.eliminated) continue;
+      if (world.mode !== 'SHOWDOWN' && o.team === e.team) continue;
+      if (!isEntityVisible(o, e, world)) continue;
+      const d = dist(e.pos.x, e.pos.y, o.pos.x, o.pos.y);
+      if (d < bestD + o.radius) {
+        bestD = d;
+        best = o;
       }
     }
-    playSound('IMPACT', 0.6);
+    return best;
+  }
+
+  /* ----------------------- Combate ----------------------- */
+
+  private fireWeapon(e: Entity, angle: number, useSuper: boolean, targetPos?: Vec2): void {
+    const world = this.world;
+    if (!world || !e.alive || e.eliminated || e.stunTimer > 0 || e.jump.active) return;
+
+    if (useSuper) {
+      if (e.superCharge < 1) return;
+      const leap = e.def.super.leap;
+      e.superCharge = 0;
+      revealEntity(e);
+      if (leap) {
+        const dir = { x: Math.cos(angle), y: Math.sin(angle) };
+        let leapDist = leap.range;
+        if (targetPos) {
+          leapDist = Math.min(
+            leap.range,
+            dist(e.pos.x, e.pos.y, targetPos.x, targetPos.y),
+          );
+        }
+        e.jump = {
+          active: true,
+          from: { x: e.pos.x, y: e.pos.y },
+          to: { x: e.pos.x + dir.x * leapDist, y: e.pos.y + dir.y * leapDist },
+          t: 0,
+          duration: leap.duration,
+        };
+        e.invulnTimer = Math.max(e.invulnTimer, leap.duration);
+        this.audio.leap();
+      } else {
+        e.timeSinceAttack = 0;
+        this.spawnAttack(e, e.def.super.attack, angle, true, targetPos);
+        this.audio.shootSuper();
+      }
+      return;
+    }
+
+    if (e.ammo < 1 || e.attackCooldown > 0) return;
+    e.ammo -= 1;
+    e.attackCooldown = ATTACK_COOLDOWN;
+    e.timeSinceAttack = 0;
+    revealEntity(e);
+    this.spawnAttack(e, e.def.attack, angle, false, targetPos);
+    this.audio.shoot(e.def.id);
+  }
+
+  private spawnAttack(
+    e: Entity,
+    def: AttackDef,
+    angle: number,
+    isSuper: boolean,
+    targetPos?: Vec2,
+  ): void {
+    const world = this.world;
+    if (!world) return;
+    const count = def.projectileCount;
+    for (let i = 0; i < count; i++) {
+      const spreadFrac = count <= 1 ? 0 : (i / (count - 1) - 0.5) * deg2rad(def.spreadDeg);
+      const a = angle + spreadFrac;
+      const dir = { x: Math.cos(a), y: Math.sin(a) };
+      const id = world.nextId++;
+
+      const base: Projectile = {
+        id,
+        ownerId: e.id,
+        ownerTeam: e.team,
+        kind: def.type,
+        pos: {
+          x: e.pos.x + dir.x * (e.radius + def.radius * 0.5 + 4),
+          y: e.pos.y + dir.y * (e.radius + def.radius * 0.5 + 4),
+        },
+        vel: { x: dir.x * def.speed, y: dir.y * def.speed },
+        dir,
+        start: { x: e.pos.x, y: e.pos.y },
+        target: { x: e.pos.x + dir.x * def.range, y: e.pos.y + dir.y * def.range },
+        radius: def.radius,
+        damage: def.damage * (1 + POWER_CUBE_DMG_BONUS * e.powerCubes),
+        speed: def.speed,
+        traveled: 0,
+        maxRange: def.range,
+        life: 6,
+        isSuper,
+        color: def.color,
+        pierce: def.pierce,
+        hitIds: [],
+        knockback: def.knockback,
+        explodeRadius: def.explodeRadius,
+        flightTime: def.flightTime,
+        flightT: 0,
+        arcHeight: def.arcHeight,
+        stun: def.stun,
+        destroyWalls: def.destroyWalls,
+        dead: false,
+      };
+
+      if (def.type === 'LOBBED') {
+        let tx = e.pos.x + dir.x * def.range;
+        let ty = e.pos.y + dir.y * def.range;
+        if (targetPos) {
+          const baseA = Math.atan2(targetPos.y - e.pos.y, targetPos.x - e.pos.x);
+          const d = Math.min(dist(e.pos.x, e.pos.y, targetPos.x, targetPos.y), def.range);
+          const perpX = -Math.sin(baseA);
+          const perpY = Math.cos(baseA);
+          const off = spreadFrac * def.range * 1.2;
+          tx = e.pos.x + Math.cos(baseA) * d + perpX * off;
+          ty = e.pos.y + Math.sin(baseA) * d + perpY * off;
+        }
+        base.start = { x: e.pos.x, y: e.pos.y };
+        base.target = { x: tx, y: ty };
+        base.pos = { x: e.pos.x, y: e.pos.y };
+        base.vel = { x: 0, y: 0 };
+      }
+      world.projectiles.push(base);
+    }
   }
 
   private updateProjectiles(dt: number): void {
-    for (const pr of this.state.projectiles) {
-      if (pr.markForRemoval) continue;
-      pr.lifetime -= dt;
+    const world = this.world;
+    const map = this.map;
+    if (!world || !map) return;
 
-      if (pr.lifetime <= 0) {
-        if (pr.explosive) {
-          this.triggerExplosion(pr.pos, pr.explodeRadius, pr.damage, pr.ownerTeam, pr.ownerId);
+    for (const p of world.projectiles) {
+      if (p.dead) continue;
+
+      if (p.kind === 'LOBBED') {
+        p.flightT += dt;
+        const t = clamp(p.flightT / Math.max(0.001, p.flightTime), 0, 1);
+        p.pos.x = lerp(p.start.x, p.target.x, t);
+        p.pos.y = lerp(p.start.y, p.target.y, t);
+        if (t >= 1) {
+          this.explodeAt(p);
+          p.dead = true;
         }
-        pr.markForRemoval = true;
         continue;
       }
 
-      let nextX = pr.pos.x + pr.vel.x * dt;
-      let nextY = pr.pos.y + pr.vel.y * dt;
+      p.pos.x += p.vel.x * dt;
+      p.pos.y += p.vel.y * dt;
+      p.traveled += p.speed * dt;
+      p.life -= dt;
 
-      if (pr.lobbed) {
-        const progress = 1 - pr.lifetime / pr.maxLifetime;
-        const arc = Math.sin(progress * Math.PI) * pr.arcHeight;
-        nextY -= arc;
+      // Tiles
+      if (projectileHitsTile(world.map, p.pos.x, p.pos.y)) {
+        if (p.destroyWalls && map.destroyTileAt(p.pos.x, p.pos.y)) {
+          this.audio.wallBreak();
+          this.burst(p.pos.x, p.pos.y, COLOR.breakableTop, 10);
+          this.addTrauma(0.32);
+        } else {
+          this.burst(p.pos.x, p.pos.y, p.color, 5);
+        }
+        if (!p.pierce) {
+          p.dead = true;
+          continue;
+        }
       }
 
-      if (!pr.lobbed) {
-        const tiles = this.getTilesAroundPoint(pr.pos, pr.radius);
-        for (const t of tiles) {
-          if (t.type === 'WALL_INDESTRUCTIBLE' || t.type === 'WALL_DESTRUCTIBLE') {
-            const r = { x: t.x * TILE_SIZE, y: t.y * TILE_SIZE, w: TILE_SIZE, h: TILE_SIZE };
-            const closestX = clamp(pr.pos.x, r.x, r.x + r.w);
-            const closestY = clamp(pr.pos.y, r.y, r.y + r.h);
-            const dx = pr.pos.x - closestX;
-            const dy = pr.pos.y - closestY;
-            if (dx * dx + dy * dy < pr.radius * pr.radius) {
-              pr.markForRemoval = true;
-              if (t.type === 'WALL_DESTRUCTIBLE') {
-                t.hp--;
-                if (t.hp <= 0) {
-                  t.type = 'FLOOR';
-                  playSound('WALL_BREAK', 0.4);
-                } else {
-                  playSound('IMPACT', 0.3);
-                }
-              } else {
-                playSound('IMPACT', 0.3);
-              }
-              break;
-            }
+      // Caixas
+      for (const c of world.crates) {
+        if (c.hp <= 0) continue;
+        if (dist(p.pos.x, p.pos.y, c.pos.x, c.pos.y) < p.radius + c.radius) {
+          this.damageCrate(c, p.damage);
+          if (!p.pierce) {
+            p.dead = true;
+          }
+          break;
+        }
+      }
+      if (p.dead) continue;
+
+      // Entidades
+      for (const e of world.entities) {
+        if (!e.alive || e.eliminated || e.id === p.ownerId) continue;
+        if (p.hitIds.includes(e.id)) continue;
+        if (world.mode !== 'SHOWDOWN' && e.team === p.ownerTeam) continue;
+        if (e.jump.active && e.invulnTimer > 0) continue;
+        if (dist(p.pos.x, p.pos.y, e.pos.x, e.pos.y) < p.radius + e.radius) {
+          p.hitIds.push(e.id);
+          const owner = world.entities.find((o) => o.id === p.ownerId) ?? null;
+          this.damageEntity(e, p.damage, owner);
+          if (p.knockback > 0) applyKnockback(e, p.dir.x, p.dir.y, p.knockback);
+          if (p.stun > 0) e.stunTimer = Math.max(e.stunTimer, p.stun);
+          this.burst(p.pos.x, p.pos.y, p.color, 6);
+          if (!p.pierce) {
+            p.dead = true;
+            break;
           }
         }
       }
 
-      if (!pr.markForRemoval) {
-        pr.pos = { x: nextX, y: nextY };
-      }
-
-      this.checkProjectileHits(pr);
-    }
-
-    this.state.projectiles = this.state.projectiles.filter((pr) => !pr.markForRemoval && pr.lifetime > 0);
-  }
-
-  private triggerExplosion(center: { x: number; y: number }, radius: number, damage: number, ownerTeam: Team, ownerId: number): void {
-    this.spawnExplosionParticles(center, '#fbbf24', 12);
-    playSound('IMPACT', 0.5);
-    for (const b of this.state.brawlers) {
-      if (b.health <= 0 || b.team === ownerTeam) continue;
-      if (distSq(b.pos, center) < radius * radius) {
-        const d = dist(b.pos, center);
-        const dmg = Math.round(damage * (1 - d / radius) * 0.8 + damage * 0.2);
-        b.health = Math.max(0, b.health - dmg);
-        b.revealTime = PHYSICS.BUSH_REVEAL_TIME;
-        b.lastDamageTime = performance.now();
-        b.regenTimer = 0;
-        const knockDir = normalize({ x: b.pos.x - center.x, y: b.pos.y - center.y });
-        applyKnockback(b, knockDir, 200, 0.3);
-        this.addDamageNumber(b.pos, String(dmg), '#fb7185');
-        if (b.health <= 0) this.onBrawlerDeath(b);
+      if (p.traveled >= p.maxRange || p.life <= 0) {
+        if (p.explodeRadius > 0) this.explodeAt(p);
+        else this.burst(p.pos.x, p.pos.y, p.color, 3);
+        p.dead = true;
       }
     }
-    const attacker = this.state.brawlers.find((x) => x.team === ownerTeam && x.health > 0);
-    if (attacker && ownerId >= 0) {
-      attacker.superCharge = Math.min(attacker.maxSuperCharge, attacker.superCharge + BALANCE.SUPER_CHARGE_PER_HIT);
-    }
+    world.projectiles = world.projectiles.filter((p) => !p.dead);
   }
 
-  private getTilesAroundPoint(pos: { x: number; y: number }, radius: number): Tile[] {
-    const found: Tile[] = [];
-    const minTx = Math.floor((pos.x - radius) / TILE_SIZE) - 1;
-    const maxTx = Math.floor((pos.x + radius) / TILE_SIZE) + 1;
-    const minTy = Math.floor((pos.y - radius) / TILE_SIZE) - 1;
-    const maxTy = Math.floor((pos.y + radius) / TILE_SIZE) + 1;
-    for (let ty = minTy; ty <= maxTy; ty++) {
-      for (let tx = minTx; tx <= maxTx; tx++) {
-        const t = getTileAt(this.state.tiles, tx * TILE_SIZE, ty * TILE_SIZE, TILE_SIZE);
-        if (t) found.push(t);
+  private explodeAt(p: Projectile): void {
+    const world = this.world;
+    const map = this.map;
+    if (!world || !map) return;
+
+    this.audio.explosion();
+    this.addTrauma(p.isSuper ? 0.7 : 0.45);
+    this.burstRing(p.pos.x, p.pos.y, p.color, p.explodeRadius);
+
+    if (p.destroyWalls) {
+      const destroyed = map.destroyTilesInRadius(p.pos.x, p.pos.y, p.explodeRadius);
+      if (destroyed > 0) this.audio.wallBreak();
+    }
+
+    const owner = world.entities.find((o) => o.id === p.ownerId) ?? null;
+    for (const e of world.entities) {
+      if (!e.alive || e.eliminated || e.id === p.ownerId) continue;
+      if (world.mode !== 'SHOWDOWN' && e.team === p.ownerTeam) continue;
+      if (e.jump.active && e.invulnTimer > 0) continue;
+      const d = dist(p.pos.x, p.pos.y, e.pos.x, e.pos.y);
+      if (d <= p.explodeRadius + e.radius) {
+        this.damageEntity(e, p.damage, owner);
+        applyKnockback(e, e.pos.x - p.pos.x, e.pos.y - p.pos.y, p.knockback);
       }
     }
-    return found;
+    for (const c of world.crates) {
+      if (c.hp <= 0) continue;
+      if (dist(p.pos.x, p.pos.y, c.pos.x, c.pos.y) <= p.explodeRadius + c.radius) {
+        this.damageCrate(c, p.damage * 1.2);
+      }
+    }
   }
 
-  private checkProjectileHits(pr: Projectile): void {
-    for (const b of this.state.brawlers) {
-      if (b.health <= 0) continue;
-      if (b.team === pr.ownerTeam) continue;
-      const d = distSq(pr.pos, b.pos);
-      const minDist = pr.radius + b.radius;
-      if (d < minDist * minDist) {
-        let damage = pr.damage;
-        const player = this.player;
-        if (pr.type === 'CONE' && player && pr.ownerId === this.playerId) {
-          const dToOwner = dist(pr.pos, player.pos);
-          damage = Math.round(damage * (1 + Math.max(0, 1 - dToOwner / (player.stats.attackRange * 1.5))));
-        }
-        b.health = Math.max(0, b.health - damage);
-        b.revealTime = PHYSICS.BUSH_REVEAL_TIME;
-        b.lastDamageTime = performance.now();
-        b.regenTimer = 0;
-        const knockDir = normalize({ x: b.pos.x - pr.pos.x, y: b.pos.y - pr.pos.y });
-        applyKnockback(b, knockDir, 260, 0.25);
-        this.addDamageNumber(b.pos, Math.round(damage), '#fb7185');
-        this.spawnExplosionParticles(b.pos, '#ef4444', 4);
-        playSound('IMPACT', 0.4);
-        const attacker = this.state.brawlers.find((x) => x.team === pr.ownerTeam && x.health > 0);
-        if (attacker) {
-          attacker.superCharge = Math.min(attacker.maxSuperCharge, attacker.superCharge + BALANCE.SUPER_CHARGE_PER_HIT);
-        }
-        if (pr.explosive) {
-          const explodeRadius = pr.explodeRadius;
-          for (const t2 of this.state.brawlers) {
-            if (t2 === b || t2.health <= 0 || t2.team === pr.ownerTeam) continue;
-            if (distSq(t2.pos, pr.pos) < explodeRadius * explodeRadius) {
-              t2.health = Math.max(0, t2.health - Math.round(damage * 0.7));
-              applyKnockback(t2, normalize({ x: t2.pos.x - pr.pos.x, y: t2.pos.y - pr.pos.y }), 200, 0.3);
-              this.addDamageNumber(t2.pos, Math.round(damage * 0.7), '#fb7185');
-              if (t2.health <= 0) this.onBrawlerDeath(t2);
-            }
+  private damageEntity(target: Entity, amount: number, attacker: Entity | null): void {
+    const world = this.world;
+    if (!world || !target.alive || target.eliminated) return;
+    if (target.invulnTimer > 0) return;
+
+    let dmg = amount;
+    if (attacker && attacker.id !== target.id) {
+      dmg *= 1 + POWER_CUBE_DMG_BONUS * attacker.powerCubes;
+    }
+    const rounded = Math.max(1, Math.round(dmg));
+    target.hp -= rounded;
+    target.timeSinceDamage = 0;
+    target.hitFlash = 0.12;
+    revealEntity(target);
+
+    if (attacker && attacker.id !== target.id) {
+      attacker.stats.damageDealt += rounded;
+      attacker.superCharge = clamp(
+        attacker.superCharge + rounded / attacker.def.superDamageNeeded,
+        0,
+        1,
+      );
+    }
+
+    this.addFloater(
+      target.pos.x + randRange(-8, 8),
+      target.pos.y - target.radius - 10,
+      `${rounded}`,
+      COLOR.damageText,
+      17,
+    );
+    this.audio.hit();
+
+    if (target.hp <= 0) {
+      this.killEntity(target, attacker);
+    }
+  }
+
+  private killEntity(target: Entity, attacker: Entity | null): void {
+    const world = this.world;
+    if (!world) return;
+    target.hp = 0;
+    target.alive = false;
+    target.vel = { x: 0, y: 0 };
+    this.burst(target.pos.x, target.pos.y, target.def.bodyColor, 18);
+    this.burstRing(target.pos.x, target.pos.y, '#ffffff', 40);
+    if (attacker && attacker.id !== target.id) attacker.stats.kills += 1;
+
+    // Derruba gemas com física de espalhamento
+    const droppedGems = target.gems;
+    for (let i = 0; i < droppedGems; i++) {
+      const a = (i / Math.max(1, droppedGems)) * Math.PI * 2 + randRange(-0.4, 0.4);
+      world.pickups.push({
+        id: world.nextId++,
+        kind: 'GEM',
+        pos: { x: target.pos.x, y: target.pos.y },
+        vel: { x: Math.cos(a) * randRange(90, 190), y: Math.sin(a) * randRange(90, 190) },
+        radius: PICKUP_RADIUS,
+        life: 9999,
+        bob: Math.random() * 6,
+      });
+    }
+    target.gems = 0;
+
+    // Derruba cubos de poder (Showdown)
+    for (let i = 0; i < target.powerCubes; i++) {
+      const a = Math.random() * Math.PI * 2;
+      world.pickups.push({
+        id: world.nextId++,
+        kind: 'POWER_CUBE',
+        pos: { x: target.pos.x, y: target.pos.y },
+        vel: { x: Math.cos(a) * randRange(80, 160), y: Math.sin(a) * randRange(80, 160) },
+        radius: PICKUP_RADIUS,
+        life: 9999,
+        bob: Math.random() * 6,
+      });
+    }
+    target.powerCubes = 0;
+
+    if (world.mode === 'GEM_GRAB') {
+      target.respawnTimer = GEM_RESPAWN_TIME;
+    } else {
+      target.eliminated = true;
+    }
+  }
+
+  private damageCrate(c: World['crates'][number], amount: number): void {
+    if (c.hp <= 0) return;
+    c.hp -= amount;
+    c.hitFlash = 0.1;
+    this.burst(c.pos.x, c.pos.y, COLOR.crate, 4);
+    if (c.hp <= 0) {
+      c.hp = 0;
+      this.audio.wallBreak();
+      this.burst(c.pos.x, c.pos.y, COLOR.crateDark, 12);
+      this.burstRing(c.pos.x, c.pos.y, COLOR.cube, 30);
+      const world = this.world;
+      if (!world) return;
+      const cubes = 1 + (Math.random() < 0.35 ? 1 : 0);
+      for (let i = 0; i < cubes; i++) {
+        const a = Math.random() * Math.PI * 2;
+        world.pickups.push({
+          id: world.nextId++,
+          kind: 'POWER_CUBE',
+          pos: { x: c.pos.x, y: c.pos.y },
+          vel: { x: Math.cos(a) * randRange(60, 130), y: Math.sin(a) * randRange(60, 130) },
+          radius: PICKUP_RADIUS,
+          life: 9999,
+          bob: Math.random() * 6,
+        });
+      }
+    }
+  }
+
+  private updateJump(e: Entity, dt: number): void {
+    const world = this.world;
+    if (!world || !e.jump.active) return;
+    e.jump.t += dt;
+    const k = clamp(e.jump.t / e.jump.duration, 0, 1);
+    e.pos.x = lerp(e.jump.from.x, e.jump.to.x, k);
+    e.pos.y = lerp(e.jump.from.y, e.jump.to.y, k);
+    if (k >= 1) {
+      e.jump.active = false;
+      const leap = e.def.super.leap;
+      if (leap) {
+        this.audio.land();
+        this.addTrauma(0.55);
+        this.burstRing(e.pos.x, e.pos.y, e.def.accentColor, leap.landRadius);
+        this.burst(e.pos.x, e.pos.y, e.def.accentColor, 14);
+        for (const o of world.entities) {
+          if (!o.alive || o.eliminated || o.id === e.id) continue;
+          if (world.mode !== 'SHOWDOWN' && o.team === e.team) continue;
+          const d = dist(e.pos.x, e.pos.y, o.pos.x, o.pos.y);
+          if (d <= leap.landRadius + o.radius) {
+            this.damageEntity(o, leap.landDamage * (1 + POWER_CUBE_DMG_BONUS * e.powerCubes), e);
+            o.stunTimer = Math.max(o.stunTimer, leap.landStun);
+            applyKnockback(o, o.pos.x - e.pos.x, o.pos.y - e.pos.y, 260);
           }
         }
-        if (b.health <= 0) this.onBrawlerDeath(b);
-        if (!pr.explosive) pr.markForRemoval = true;
-        if (pr.pierce <= 0 && !pr.explosive) pr.markForRemoval = true;
-        return;
       }
     }
   }
 
-  private updateGems(dt: number): void {
-    const player = this.player!;
-    for (const g of this.state.gems) {
-      if (g.collected) continue;
-      if (distSq(player.pos, g.pos) < 30 * 30) {
-        g.collected = true;
-        this.gemsHeld[player.team]++;
-        playSound('GEM_PICKUP', 0.5);
-        this.addDamageNumber(g.pos, '+1 Gema', '#22d3ee');
-        if (this.gemsHeld[player.team] >= GAME.GEMS_TO_COUNTDOWN && !this.showCountdown) {
-          this.showCountdown = true;
-          this.countdownTimer = GAME.GEM_COUNTDOWN_TIME;
+  /* ----------------------- Itens / partículas ----------------------- */
+
+  private updatePickups(dt: number): void {
+    const world = this.world;
+    const map = this.map;
+    if (!world || !map) return;
+
+    for (const p of world.pickups) {
+      if (p.life <= 0) continue;
+      p.bob += dt * 2;
+      p.pos.x += p.vel.x * dt;
+      p.pos.y += p.vel.y * dt;
+      resolveCircleTiles(p.pos, p.radius, map);
+      const decay = Math.exp(-4.2 * dt);
+      p.vel.x *= decay;
+      p.vel.y *= decay;
+
+      for (const e of world.entities) {
+        if (!e.alive || e.eliminated) continue;
+        const d = dist(p.pos.x, p.pos.y, e.pos.x, e.pos.y);
+        if (d < PICKUP_MAGNET + e.radius && d > 1) {
+          const n = normalize(e.pos.x - p.pos.x, e.pos.y - p.pos.y);
+          p.pos.x += n.x * 150 * dt;
+          p.pos.y += n.y * 150 * dt;
+        }
+        if (d < PICKUP_RADIUS + e.radius + 4) {
+          if (p.kind === 'GEM') {
+            e.gems += 1;
+            e.stats.gemsCollected += 1;
+            this.audio.gemPickup();
+            this.addFloater(e.pos.x, e.pos.y - e.radius - 22, '+1 💎', COLOR.gemLight, 13);
+          } else {
+            e.powerCubes += 1;
+            e.maxHp += POWER_CUBE_HP_BONUS;
+            e.hp = Math.min(e.maxHp, e.hp + POWER_CUBE_HP_BONUS);
+            this.audio.cubePickup();
+            this.addFloater(e.pos.x, e.pos.y - e.radius - 22, '+400 ❤️', COLOR.cubeLight, 13);
+          }
+          p.life = 0;
+          break;
         }
       }
     }
-    this.state.gems = this.state.gems.filter((g) => !g.collected);
-
-    this.state.gemSpawnTimer += dt;
-    if (this.state.gemSpawnTimer >= GAME.GEM_SPAWN_INTERVAL && this.mode === 'GEM_GRAB') {
-      this.state.gemSpawnTimer = 0;
-      this.state.gems.push(spawnGem());
-    }
-  }
-
-  private updatePowerCubes(dt: number): void {
-    const player = this.player!;
-    for (const c of this.state.powerCubes) {
-      if (c.collected) continue;
-      if (distSq(player.pos, c.pos) < 30 * 30) {
-        c.collected = true;
-        player.powerCubes++;
-        player.maxHealth += GAME.SHOWDOWN_POWER_CUBE_HP;
-        player.health = player.maxHealth;
-        playSound('GEM_PICKUP', 0.5);
-        this.addDamageNumber(c.pos, '+400 HP', '#f59e0b');
-      }
-    }
-    this.state.powerCubes = this.state.powerCubes.filter((c) => !c.collected);
-  }
-
-  private updateToxicCloud(dt: number): void {
-    if (this.mode !== 'SHOWDOWN') return;
-    this.toxicDamageTimer += dt;
-    const maxRadius = Math.max(MAP_WIDTH, MAP_HEIGHT) / 2 + 300;
-    const closeTime = GAME.TOXIC_CLOSE_TIME;
-    this.toxicRadius = Math.min(maxRadius, (this.state.time / closeTime) * maxRadius);
-    if (this.toxicDamageTimer >= 1.0) {
-      this.toxicDamageTimer = 0;
-      const centerX = MAP_WIDTH / 2;
-      const centerY = MAP_HEIGHT / 2;
-      for (const b of this.state.brawlers) {
-        if (b.health <= 0) continue;
-        const d = dist(b.pos, { x: centerX, y: centerY });
-        if (d > this.toxicRadius) {
-          const damage = GAME.TOXIC_DAMAGE_PER_SECOND * (1 + (d - this.toxicRadius) / 200);
-          b.health = Math.max(0, b.health - damage);
-          b.revealTime = PHYSICS.BUSH_REVEAL_TIME;
-          this.addDamageNumber(b.pos, Math.round(damage), '#fb7185');
-          if (b.health <= 0) this.onBrawlerDeath(b);
-        }
-      }
-    }
+    world.pickups = world.pickups.filter((p) => p.life > 0);
   }
 
   private updateParticles(dt: number): void {
-    for (const p of this.state.particles) {
-      p.pos.x += p.vel.x * dt;
-      p.pos.y += p.vel.y * dt;
-      p.life -= dt;
+    const world = this.world;
+    if (!world) return;
+    for (const pt of world.particles) {
+      pt.life -= dt;
+      pt.pos.x += pt.vel.x * dt;
+      pt.pos.y += pt.vel.y * dt;
+      pt.vel.y += pt.gravity * dt;
+      pt.vel.x *= Math.exp(-2.2 * dt);
+      pt.vel.y *= Math.exp(-2.2 * dt);
     }
-    this.state.particles = this.state.particles.filter((p) => p.life > 0);
+    world.particles = world.particles.filter((pt) => pt.life > 0);
+
+    for (const f of world.floaters) {
+      f.life -= dt;
+      f.pos.y += f.vy * dt;
+      f.vy *= Math.exp(-1.6 * dt);
+    }
+    world.floaters = world.floaters.filter((f) => f.life > 0);
   }
 
-  private updateDamageNumbers(dt: number): void {
-    for (const d of this.state.damageNumbers) {
-      d.pos.x += d.vel.x * dt;
-      d.pos.y += d.vel.y * dt;
-      d.life -= dt;
+  private updateCrates(dt: number): void {
+    const world = this.world;
+    if (!world) return;
+    for (const c of world.crates) {
+      c.hitFlash = Math.max(0, c.hitFlash - dt);
     }
-    this.state.damageNumbers = this.state.damageNumbers.filter((d) => d.life > 0);
   }
 
-  private checkWinConditions(dt: number): void {
-    if (this.mode === 'GEM_GRAB') {
-      if (this.showCountdown) {
-        this.countdownTimer -= dt;
-        if (this.countdownTimer <= 0) {
-          this.endGame(this.player!.team);
+  private updateRespawns(dt: number): void {
+    const world = this.world;
+    const map = this.map;
+    if (!world || !map) return;
+    if (world.mode !== 'GEM_GRAB') return;
+
+    for (const e of world.entities) {
+      if (e.alive || e.eliminated) continue;
+      e.respawnTimer -= dt;
+      if (e.respawnTimer <= 0) {
+        const spawns = world.spawnPoints[e.team];
+        const sp = spawns.length > 0 ? spawns[e.id % spawns.length] : { x: WORLD_WIDTH / 2, y: WORLD_HEIGHT / 2 };
+        e.pos.x = sp.x;
+        e.pos.y = sp.y;
+        e.hp = e.maxHp;
+        e.ammo = MAX_AMMO;
+        e.alive = true;
+        e.invulnTimer = 1.2;
+        e.superCharge = Math.min(1, e.superCharge + 0.25);
+        this.burst(e.pos.x, e.pos.y, e.def.accentColor, 12);
+      }
+    }
+  }
+
+  /* ----------------------- Modos de jogo ----------------------- */
+
+  private teamGemCount(team: Entity['team']): number {
+    const world = this.world;
+    if (!world) return 0;
+    let total = 0;
+    for (const e of world.entities) {
+      if (e.team === team && e.alive && !e.eliminated) total += e.gems;
+    }
+    return total;
+  }
+
+  private updateGemGrab(dt: number): void {
+    const world = this.world;
+    const map = this.map;
+    if (!world || !map || world.mode !== 'GEM_GRAB') return;
+
+    // Spawner central: 1 gema a cada 7s
+    world.gemTimer -= dt;
+    if (world.gemTimer <= 0) {
+      world.gemTimer = GEM_SPAWN_INTERVAL;
+      const center = getMapCenter();
+      const a = Math.random() * Math.PI * 2;
+      world.pickups.push({
+        id: world.nextId++,
+        kind: 'GEM',
+        pos: { x: center.x, y: center.y },
+        vel: { x: Math.cos(a) * 70, y: Math.sin(a) * 70 },
+        radius: PICKUP_RADIUS,
+        life: 9999,
+        bob: Math.random() * 6,
+      });
+    }
+
+    const blue = this.teamGemCount('BLUE');
+    const red = this.teamGemCount('RED');
+
+    if (blue >= GEM_WIN_COUNT || red >= GEM_WIN_COUNT) {
+      const team: Entity['team'] = blue >= GEM_WIN_COUNT ? 'BLUE' : 'RED';
+      if (!world.countdownActive) {
+        world.countdownActive = true;
+        world.countdownTeam = team;
+        world.countdown = GEM_COUNTDOWN_TIME;
+        this.audio.countdownTick(false);
+      } else if (world.countdownTeam === team) {
+        const prev = Math.ceil(world.countdown);
+        world.countdown -= dt;
+        const now = Math.ceil(world.countdown);
+        if (now < prev && now >= 0) this.audio.countdownTick(now <= 3);
+        if (world.countdown <= 0) {
+          const playerWon = this.player !== null && this.player.team === team;
+          this.endGame(
+            playerWon ? 'VICTORY' : 'DEFEAT',
+            playerWon ? 'Seu time segurou 10 gemas!' : `O time ${team === 'BLUE' ? 'azul' : 'vermelho'} venceu!`,
+          );
+        }
+      } else {
+        world.countdownTeam = team;
+        world.countdown = GEM_COUNTDOWN_TIME;
+      }
+    } else if (world.countdownActive) {
+      const held = this.teamGemCount(world.countdownTeam);
+      if (held < GEM_WIN_COUNT) {
+        world.countdownActive = false;
+        world.countdownTeam = 'NEUTRAL';
+      }
+    }
+  }
+
+  private updateShowdown(dt: number): void {
+    const world = this.world;
+    const player = this.player;
+    if (!world || !player || world.mode !== 'SHOWDOWN') return;
+
+    // Nuvens tóxicas fechando das bordas para o centro
+    if (world.time > POISON_START_DELAY) {
+      world.poisonTimer += dt;
+      if (world.poisonTimer >= POISON_STEP_INTERVAL) {
+        world.poisonTimer = 0;
+        world.poisonLevel += 1;
+        world.poisonRadius = Math.max(2, Math.max(MAP_TILES_X, MAP_TILES_Y) / 2 + 2 - world.poisonLevel * 1.6);
+      }
+    }
+
+    // Dano por tick
+    this.poisonDmgAcc += dt;
+    if (this.poisonDmgAcc >= POISON_DAMAGE_TICK) {
+      const tickDmg = (POISON_BASE_DPS + POISON_DPS_GROWTH * world.poisonLevel) * this.poisonDmgAcc;
+      this.poisonDmgAcc = 0;
+      const cxTile = MAP_TILES_X / 2;
+      const cyTile = MAP_TILES_Y / 2;
+      for (const e of world.entities) {
+        if (!e.alive || e.eliminated) continue;
+        const tx = Math.floor(e.pos.x / 32);
+        const ty = Math.floor(e.pos.y / 32);
+        const dCheb = Math.max(Math.abs(tx - cxTile), Math.abs(ty - cyTile));
+        if (dCheb > world.poisonRadius) {
+          e.hp -= tickDmg;
+          e.timeSinceDamage = 0;
+          this.addFloater(e.pos.x, e.pos.y - e.radius - 10, `${Math.round(tickDmg)}`, '#e070ff', 14);
+          if (e.hp <= 0) this.killEntity(e, null);
         }
       }
     }
-    const aliveTeams = new Set(this.state.brawlers.filter((b) => b.health > 0).map((b) => b.team));
-    if (this.mode === 'SHOWDOWN' && aliveTeams.size <= 1) {
-      const winner = aliveTeams.has('BLUE') ? 'BLUE' : 'RED';
-      this.endGame(winner);
+
+    // Eliminação do jogador
+    if (player.eliminated && !world.gameOver) {
+      const alive = world.entities.filter((e) => e.alive && !e.eliminated).length;
+      world.playerPlacement = alive + 1;
+      this.endGame('DEFEAT', `Você ficou em #${world.playerPlacement}º lugar`);
+      return;
+    }
+
+    // Vitória: último de pé
+    const alive = world.entities.filter((e) => e.alive && !e.eliminated);
+    if (alive.length === 1 && alive[0].id === player.id && !world.gameOver) {
+      this.endGame('VICTORY', 'Você é o último de pé!');
     }
   }
 
-  private endGame(winnerTeam: Team): void {
-    this.winner = winnerTeam;
-    this.running = false;
-    if (this.animFrame) cancelAnimationFrame(this.animFrame);
-    if (this.winner === this.player!.team) {
-      playSound('VICTORY', 0.7);
-      this.showMessage('VITÓRIA', 'msg-victory');
-    } else {
-      playSound('DEFEAT', 0.7);
-      this.showMessage('DERROTA', 'msg-defeat');
+  private endGame(result: 'VICTORY' | 'DEFEAT', subtitle: string): void {
+    const world = this.world;
+    const player = this.player;
+    if (!world || !player || world.gameOver) return;
+    world.gameOver = true;
+    world.result = result;
+    world.winner = subtitle;
+
+    const title = el('go-title');
+    title.textContent = result === 'VICTORY' ? '🏆 VITÓRIA!' : '💀 DERROTA';
+    title.className = 'go-title ' + (result === 'VICTORY' ? 'win' : 'lose');
+    el('go-subtitle').textContent = subtitle;
+
+    const stats = el('go-stats');
+    stats.innerHTML = `
+      <div class="go-stat"><b>${player.stats.kills}</b><span>Abates</span></div>
+      <div class="go-stat"><b>${player.stats.gemsCollected}</b><span>Gemas</span></div>
+      <div class="go-stat"><b>${player.stats.damageDealt.toLocaleString('pt-BR')}</b><span>Dano</span></div>
+      <div class="go-stat"><b>${player.powerCubes}</b><span>Cubos</span></div>
+    `;
+
+    if (result === 'VICTORY') this.audio.victory();
+    else this.audio.defeat();
+    this.setScreen('GAME_OVER');
+  }
+
+  /* ----------------------- Câmera / efeitos ----------------------- */
+
+  private updateCamera(dt: number): void {
+    const player = this.player;
+    if (player && player.alive && !player.eliminated) {
+      this.camTarget = { x: player.pos.x, y: player.pos.y };
     }
-    this.showScreen('GAME_OVER');
-    this.updateGameOverUI();
+    const k = 1 - Math.exp(-CAMERA_LERP * dt);
+    this.cam.x = lerp(this.cam.x, this.camTarget.x, k);
+    this.cam.y = lerp(this.cam.y, this.camTarget.y, k);
+
+    const zoomTarget = clamp(this.renderer.viewHeight / VIEW_HEIGHT, 0.5, 1.6);
+    this.cam.zoom = lerp(this.cam.zoom, zoomTarget, 0.08);
+
+    const halfW = this.renderer.viewWidth / (2 * this.cam.zoom);
+    const halfH = this.renderer.viewHeight / (2 * this.cam.zoom);
+    if (halfW * 2 < WORLD_WIDTH) this.cam.x = clamp(this.cam.x, halfW, WORLD_WIDTH - halfW);
+    else this.cam.x = WORLD_WIDTH / 2;
+    if (halfH * 2 < WORLD_HEIGHT) this.cam.y = clamp(this.cam.y, halfH, WORLD_HEIGHT - halfH);
+    else this.cam.y = WORLD_HEIGHT / 2;
+
+    this.cam.trauma = Math.max(0, this.cam.trauma - SHAKE_DECAY * dt);
   }
 
-  private showMessage(text: string, cls: string): void {
-    const banner = document.getElementById('msgBanner')!;
-    const msgText = document.getElementById('msgText')!;
-    msgText.textContent = text;
-    banner.className = 'msg-banner visible ' + cls;
-    setTimeout(() => banner.classList.remove('visible'), 2500);
+  private addTrauma(v: number): void {
+    this.cam.trauma = clamp(this.cam.trauma + v, 0, 1);
   }
 
-  private updateGameOverUI(): void {
-    const result = document.getElementById('goResult')!;
-    const stats = document.getElementById('goStats')!;
-    const player = this.player!;
-    result.textContent = this.winner === player.team ? 'VITÓRIA' : 'DERROTA';
-    result.className = `game-over-result ${this.winner === player.team ? 'result-victory' : 'result-defeat'}`;
-    stats.innerHTML = `Gemas: ${this.gemsHeld[player.team]} • Cubos: ${player.powerCubes} • Tempo: ${Math.floor(this.state.time)}s`;
+  private burst(x: number, y: number, color: string, count: number): void {
+    const world = this.world;
+    if (!world) return;
+    for (let i = 0; i < count; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const sp = randRange(60, 260);
+      world.particles.push({
+        pos: { x, y },
+        vel: { x: Math.cos(a) * sp, y: Math.sin(a) * sp - 40 },
+        life: randRange(0.25, 0.6),
+        maxLife: 0.6,
+        size: randRange(2.5, 5.5),
+        color,
+        kind: Math.random() < 0.5 ? 'SPARK' : 'CIRCLE',
+        gravity: 240,
+      });
+    }
   }
+
+  private burstRing(x: number, y: number, color: string, radius: number): void {
+    const world = this.world;
+    if (!world) return;
+    world.particles.push({
+      pos: { x, y },
+      vel: { x: 0, y: 0 },
+      life: 0.42,
+      maxLife: 0.42,
+      size: Math.max(18, radius * 0.55),
+      color,
+      kind: 'RING',
+      gravity: 0,
+    });
+    for (let i = 0; i < 10; i++) {
+      const a = (i / 10) * Math.PI * 2;
+      world.particles.push({
+        pos: { x: x + Math.cos(a) * radius * 0.35, y: y + Math.sin(a) * radius * 0.35 },
+        vel: { x: Math.cos(a) * radius * 1.6, y: Math.sin(a) * radius * 1.6 },
+        life: 0.38,
+        maxLife: 0.38,
+        size: 5,
+        color,
+        kind: 'SMOKE',
+        gravity: -30,
+      });
+    }
+  }
+
+  private addFloater(x: number, y: number, text: string, color: string, size: number): void {
+    const world = this.world;
+    if (!world) return;
+    world.floaters.push({
+      pos: { x, y },
+      text,
+      color,
+      life: 0.85,
+      maxLife: 0.85,
+      vy: -68,
+      size,
+    });
+  }
+
+  /* ----------------------- HUD ----------------------- */
 
   private updateHUD(): void {
-    const player = this.player!;
-    if (!player) return;
-    const healthFill = document.getElementById('healthFill') as HTMLDivElement;
-    const superFill = document.getElementById('superFill') as HTMLDivElement;
-    const superReady = document.getElementById('superReady') as HTMLDivElement;
-    const ammoEl = document.getElementById('ammoSlots')!;
-    const modeTitle = document.getElementById('modeTitle')!;
-    const modeSub = document.getElementById('modeSub')!;
-    const gemCounter = document.getElementById('gemCounter')!;
-    const gemCount = document.getElementById('gemCount')!;
-
-    if (healthFill) healthFill.style.width = `${(player.health / player.maxHealth) * 100}%`;
-    if (superFill) superFill.style.width = `${(player.superCharge / player.maxSuperCharge) * 100}%`;
-    if (superReady) superReady.style.display = player.superCharge >= player.maxSuperCharge ? 'block' : 'none';
-
-    ammoEl.innerHTML = '';
-    for (let i = 0; i < player.maxAmmo; i++) {
-      const slot = document.createElement('div');
-      slot.className = `ammo-slot ${i < player.ammo ? 'ready' : 'empty'}`;
-      ammoEl.appendChild(slot);
-    }
-
-    if (this.mode === 'GEM_GRAB') {
-      modeTitle.textContent = 'PIQUE-GEMA';
-      modeSub.textContent = 'Segure 10+ gemas para iniciar a contagem';
-      gemCounter.style.display = 'flex';
-      gemCount.textContent = String(this.gemsHeld[player.team]);
-    } else {
-      modeTitle.textContent = 'COMBATE SOLO';
-      modeSub.textContent = 'Colete cubos de poder e sobreviva';
-      gemCounter.style.display = 'none';
-    }
-  }
-
-  private render(): void {
-    const ctx = this.renderer;
-    ctx.clear();
-
-    ctx.renderMap(this.state.tiles, TILE_SIZE, this.state.camera);
-    ctx.renderShadows(this.state.brawlers);
-    ctx.renderBrawlers(this.state.brawlers, this.playerId, TILE_SIZE, this.state.tiles);
-    ctx.renderProjectiles(this.state.projectiles);
-    ctx.renderGems(this.state.gems);
-    ctx.renderPowerCubes(this.state.powerCubes);
-    ctx.renderParticles(this.state.particles);
-    ctx.renderDamageNumbers(this.state.damageNumbers);
-
+    const hud = el('hud');
+    const superBtn = el('super-btn');
+    const world = this.world;
     const player = this.player;
-    if (player) {
-      const aim = this.input.getAimWorldPos(this.state.camera);
-      ctx.renderAimReticle(aim as { x: number; y: number }, player, this.state.camera);
-      ctx.renderHealthBar(player, this.state.camera);
-      ctx.renderAmmoSlots(player, this.state.camera);
-      ctx.renderSuperCharge(player, this.state.camera);
-      ctx.renderBushOverlay(player, this.state.tiles, TILE_SIZE);
+
+    if (this.screen !== 'PLAYING' || !world || !player) {
+      hud.classList.add('hidden');
+      superBtn.classList.add('hidden');
+      return;
     }
-  }
+    hud.classList.remove('hidden');
+    superBtn.classList.remove('hidden');
 
-  private loop(): void {
-    const now = performance.now();
-    let dt = (now - this.lastTime) / 1000;
-    this.lastTime = now;
-    dt = Math.min(dt, 0.05);
+    const charge = clamp(player.superCharge, 0, 1);
+    superBtn.style.background = `conic-gradient(#ffe14d ${charge * 360}deg, rgba(255,255,255,0.18) 0deg)`;
+    superBtn.classList.toggle('ready', charge >= 1);
 
-    this.update(dt);
-    this.render();
+    const left = el('hud-blue-count');
+    const right = el('hud-red-count');
+    const center = el('hud-center-text');
 
-    if (this.running) {
-      this.animFrame = requestAnimationFrame(() => this.loop());
+    if (world.mode === 'GEM_GRAB') {
+      left.textContent = `${this.teamGemCount('BLUE')}`;
+      right.textContent = `${this.teamGemCount('RED')}`;
+      if (world.countdownActive) {
+        center.textContent = `⏱ ${Math.max(0, Math.ceil(world.countdown))}s`;
+      } else {
+        const mins = Math.floor(world.time / 60);
+        const secs = Math.floor(world.time % 60);
+        center.textContent = `${mins}:${secs.toString().padStart(2, '0')}`;
+      }
+    } else {
+      left.textContent = `🍊 ${player.powerCubes}`;
+      const alive = world.entities.filter((e) => e.alive && !e.eliminated).length;
+      right.textContent = `☠️ ${alive}`;
+      if (world.time > POISON_START_DELAY) {
+        center.textContent = `☠️ Veneno ${world.poisonLevel}`;
+      } else {
+        center.textContent = `⏱ ${Math.ceil(POISON_START_DELAY - world.time)}s`;
+      }
     }
   }
 }
 
-window.addEventListener('DOMContentLoaded', () => {
-  new Game();
-});
+/* ============================ BOOT ============================ */
+
+const game = new Game();
+game.init();

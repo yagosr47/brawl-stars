@@ -121,6 +121,9 @@ export interface Entity {
   revealTimer: number;
   invulnTimer: number;
   hitFlash: number;
+  attackAnim: number;
+  stuckTimer: number;
+  lastPos: Vec2;
   alive: boolean;
   respawnTimer: number;
   eliminated: boolean;
@@ -194,7 +197,7 @@ export interface Particle {
   maxLife: number;
   size: number;
   color: string;
-  kind: 'CIRCLE' | 'SPARK' | 'SMOKE' | 'RING';
+  kind: 'CIRCLE' | 'SPARK' | 'SMOKE' | 'RING' | 'FLASH';
   gravity: number;
 }
 

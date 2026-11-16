@@ -19,50 +19,99 @@ import {
  * paredes e quinas (sem travar).
  */
 export function resolveCircleTiles(pos: Vec2, radius: number, map: TileMapView): boolean {
-  const ts = map.tileSize;
   let collided = false;
+  // Duas passagens estabilizam quinas (círculo entre dois tiles diagonais).
+  for (let pass = 0; pass < 2; pass++) {
+    const ts = map.tileSize;
+    const minTX = Math.floor((pos.x - radius) / ts);
+    const maxTX = Math.floor((pos.x + radius) / ts);
+    const minTY = Math.floor((pos.y - radius) / ts);
+    const maxTY = Math.floor((pos.y + radius) / ts);
+
+    for (let ty = minTY; ty <= maxTY; ty++) {
+      for (let tx = minTX; tx <= maxTX; tx++) {
+        if (!map.isSolidAt(tx * ts + ts * 0.5, ty * ts + ts * 0.5)) continue;
+        const left = tx * ts;
+        const top = ty * ts;
+        const right = left + ts;
+        const bottom = top + ts;
+
+        const cx = clamp(pos.x, left, right);
+        const cy = clamp(pos.y, top, bottom);
+        const dx = pos.x - cx;
+        const dy = pos.y - cy;
+        const d2 = dx * dx + dy * dy;
+
+        if (d2 >= radius * radius) continue;
+        collided = true;
+
+        if (d2 > 1e-8) {
+          const d = Math.sqrt(d2);
+          const push = radius - d + 0.05;
+          pos.x += (dx / d) * push;
+          pos.y += (dy / d) * push;
+        } else {
+          // Centro dentro do tile: sai pelo eixo de menor penetração.
+          const pushLeft = pos.x - left + radius;
+          const pushRight = right - pos.x + radius;
+          const pushTop = pos.y - top + radius;
+          const pushBottom = bottom - pos.y + radius;
+          const minPush = Math.min(pushLeft, pushRight, pushTop, pushBottom);
+          if (minPush === pushLeft) pos.x = left - radius - 0.05;
+          else if (minPush === pushRight) pos.x = right + radius + 0.05;
+          else if (minPush === pushTop) pos.y = top - radius - 0.05;
+          else pos.y = bottom + radius + 0.05;
+        }
+      }
+    }
+  }
+  return collided;
+}
+
+/** O círculo em pos está totalmente livre de sólidos? */
+export function isCircleFree(pos: Vec2, radius: number, map: TileMapView): boolean {
+  const ts = map.tileSize;
   const minTX = Math.floor((pos.x - radius) / ts);
   const maxTX = Math.floor((pos.x + radius) / ts);
   const minTY = Math.floor((pos.y - radius) / ts);
   const maxTY = Math.floor((pos.y + radius) / ts);
-
   for (let ty = minTY; ty <= maxTY; ty++) {
     for (let tx = minTX; tx <= maxTX; tx++) {
       if (!map.isSolidAt(tx * ts + ts * 0.5, ty * ts + ts * 0.5)) continue;
       const left = tx * ts;
       const top = ty * ts;
-      const right = left + ts;
-      const bottom = top + ts;
-
-      const cx = clamp(pos.x, left, right);
-      const cy = clamp(pos.y, top, bottom);
+      const cx = clamp(pos.x, left, left + ts);
+      const cy = clamp(pos.y, top, top + ts);
       const dx = pos.x - cx;
       const dy = pos.y - cy;
-      const d2 = dx * dx + dy * dy;
+      if (dx * dx + dy * dy < radius * radius) return false;
+    }
+  }
+  return true;
+}
 
-      if (d2 >= radius * radius) continue;
-      collided = true;
-
-      if (d2 > 1e-8) {
-        const d = Math.sqrt(d2);
-        const push = radius - d + 0.05;
-        pos.x += (dx / d) * push;
-        pos.y += (dy / d) * push;
-      } else {
-        // Centro dentro do tile: sai pelo eixo de menor penetração.
-        const pushLeft = pos.x - left + radius;
-        const pushRight = right - pos.x + radius;
-        const pushTop = pos.y - top + radius;
-        const pushBottom = bottom - pos.y + radius;
-        const minPush = Math.min(pushLeft, pushRight, pushTop, pushBottom);
-        if (minPush === pushLeft) pos.x = left - radius - 0.05;
-        else if (minPush === pushRight) pos.x = right + radius + 0.05;
-        else if (minPush === pushTop) pos.y = top - radius - 0.05;
-        else pos.y = bottom + radius + 0.05;
+/**
+ * Procura a posição livre mais próxima de `pos` (espiral em tiles).
+ * Usado em respawn e no destino de saltos para nunca prender entidades em blocos.
+ */
+export function findFreeSpot(pos: Vec2, radius: number, map: TileMapView, maxTiles = 6): Vec2 {
+  const ts = map.tileSize;
+  const tx0 = Math.floor(pos.x / ts);
+  const ty0 = Math.floor(pos.y / ts);
+  if (isCircleFree(pos, radius, map)) return { x: pos.x, y: pos.y };
+  for (let r = 1; r <= maxTiles; r++) {
+    for (let dy = -r; dy <= r; dy++) {
+      for (let dx = -r; dx <= r; dx++) {
+        if (Math.max(Math.abs(dx), Math.abs(dy)) !== r) continue;
+        const cx = (tx0 + dx + 0.5) * ts;
+        const cy = (ty0 + dy + 0.5) * ts;
+        const candidate = { x: cx, y: cy };
+        if (isCircleFree(candidate, radius, map)) return candidate;
       }
     }
   }
-  return collided;
+  // Último recurso: centro do mapa.
+  return { x: map.width * ts * 0.5, y: map.height * ts * 0.5 };
 }
 
 /** Move a entidade pela velocidade + knockback e resolve colisões. */

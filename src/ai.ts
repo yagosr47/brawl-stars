@@ -8,7 +8,7 @@
    ============================================================ */
 
 import type { Entity, Vec2, World } from './types';
-import { isEnemy, isEntityVisible, lineOfSight } from './physics';
+import { findFreeSpot, isEnemy, isEntityVisible, lineOfSight } from './physics';
 import {
   AUTO_AIM_EXTRA_RANGE,
   TILE_SIZE,
@@ -160,18 +160,28 @@ function tryUseSuper(e: Entity, world: World, ctx: AIContext, target: Entity | n
 }
 
 function botWanderTarget(world: World): Vec2 {
-  if (world.mode === 'GEM_GRAB') {
-    const cx = world.map.width * world.map.tileSize * 0.5;
-    const cy = world.map.height * world.map.tileSize * 0.5;
-    return {
-      x: cx + randRange(-TILE_SIZE * 6, TILE_SIZE * 6),
-      y: cy + randRange(-TILE_SIZE * 5, TILE_SIZE * 5),
-    };
+  const w = world.map.width * TILE_SIZE;
+  const h = world.map.height * TILE_SIZE;
+  // Sempre escolhe um ponto livre (nunca dentro de parede/água).
+  for (let attempt = 0; attempt < 16; attempt++) {
+    let x: number;
+    let y: number;
+    if (world.mode === 'GEM_GRAB') {
+      x = w * 0.5 + randRange(-TILE_SIZE * 8, TILE_SIZE * 8);
+      y = h * 0.5 + randRange(-TILE_SIZE * 6, TILE_SIZE * 6);
+    } else {
+      x = randRange(TILE_SIZE * 3, w - TILE_SIZE * 3);
+      y = randRange(TILE_SIZE * 3, h - TILE_SIZE * 3);
+    }
+    if (!world.map.isSolidAt(x, y)) return { x, y };
   }
-  return {
-    x: randRange(TILE_SIZE * 3, world.map.width * world.map.tileSize - TILE_SIZE * 3),
-    y: randRange(TILE_SIZE * 3, world.map.height * world.map.tileSize - TILE_SIZE * 3),
-  };
+  return { x: w * 0.5, y: h * 0.5 };
+}
+
+/** Garante que o alvo de movimento não está dentro de um sólido. */
+function safeTarget(e: Entity, world: World, target: Vec2): Vec2 {
+  if (!world.map.isSolidAt(target.x, target.y)) return target;
+  return findFreeSpot(target, e.radius, world.map, 3);
 }
 
 function moveAlong(e: Entity, world: World, target: Vec2, speedScale: number): void {
@@ -304,7 +314,7 @@ export function updateBotAI(e: Entity, world: World, ctx: AIContext, dt: number)
 
   /* -------- Movimento final -------- */
   if (moveTarget) {
-    moveAlong(e, world, moveTarget, speedScale);
+    moveAlong(e, world, safeTarget(e, world, moveTarget), speedScale);
   } else {
     e.vel.x = 0;
     e.vel.y = 0;

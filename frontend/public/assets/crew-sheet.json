@@ -1,0 +1,9 @@
+{
+  "frameWidth": 192,
+  "frameHeight": 240,
+  "count": 55,
+  "walkStart": 1,
+  "walkEnd": 12,
+  "deathStart": 13,
+  "deathEnd": 54
+}
